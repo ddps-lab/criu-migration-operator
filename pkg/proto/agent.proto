@@ -1,0 +1,158 @@
+syntax = "proto3";
+
+package agent;
+
+option go_package = "github.com/ddps-lab/criu-migration-operator/pkg/proto";
+
+// CRIUAgent service provides checkpoint and restore operations
+service CRIUAgent {
+  // PreCheckpoint performs an incremental pre-checkpoint
+  rpc PreCheckpoint(PreCheckpointRequest) returns (PreCheckpointResponse);
+
+  // FinalDump performs the final dump with page-server
+  rpc FinalDump(FinalDumpRequest) returns (FinalDumpResponse);
+
+  // Restore restores a process from a checkpoint
+  rpc Restore(RestoreRequest) returns (RestoreResponse);
+
+  // GetStatus returns the current status of the agent
+  rpc GetStatus(StatusRequest) returns (StatusResponse);
+
+  // StartPageServer starts the page-server for lazy restore
+  rpc StartPageServer(PageServerRequest) returns (PageServerResponse);
+}
+
+// PreCheckpointRequest contains parameters for pre-checkpoint
+message PreCheckpointRequest {
+  // Parent checkpoint ID for incremental dump
+  string parent_dump_id = 1;
+
+  // Whether to upload to S3 immediately
+  bool upload_to_s3 = 2;
+}
+
+// PreCheckpointResponse contains the result of pre-checkpoint
+message PreCheckpointResponse {
+  // Generated checkpoint ID
+  string dump_id = 1;
+
+  // Timestamp when checkpoint was created
+  int64 timestamp = 2;
+
+  // Size of the checkpoint in bytes
+  int64 size_bytes = 3;
+
+  // Number of memory pages dumped
+  int64 pages_dumped = 4;
+}
+
+// FinalDumpRequest contains parameters for final dump
+message FinalDumpRequest {
+  // Page-server address (target pod IP)
+  string page_server_addr = 1;
+
+  // Page-server port
+  int32 page_server_port = 2;
+
+  // Parent checkpoint ID
+  string parent_dump_id = 3;
+
+  // Whether to leave process running (for testing)
+  bool leave_running = 4;
+}
+
+// FinalDumpResponse contains the result of final dump
+message FinalDumpResponse {
+  // Generated checkpoint ID
+  string dump_id = 1;
+
+  // Timestamp when dump was created
+  int64 timestamp = 2;
+
+  // Size of metadata in bytes (pages sent via page-server)
+  int64 metadata_size_bytes = 3;
+}
+
+// RestoreRequest contains parameters for restore
+message RestoreRequest {
+  // Checkpoint ID to restore from
+  string dump_id = 1;
+
+  // S3 bucket name
+  string s3_bucket = 2;
+
+  // S3 prefix (path to checkpoint)
+  string s3_prefix = 3;
+
+  // Whether to use lazy pages
+  bool use_lazy_pages = 4;
+
+  // Page-server port for lazy restore
+  int32 page_server_port = 5;
+}
+
+// RestoreResponse contains the result of restore
+message RestoreResponse {
+  // Whether restore was successful
+  bool success = 1;
+
+  // PID of the restored process
+  int32 new_pid = 2;
+
+  // Timestamp when restore completed
+  int64 timestamp = 3;
+
+  // Restore duration in milliseconds
+  int64 duration_ms = 4;
+}
+
+// StatusRequest is empty for now
+message StatusRequest {}
+
+// StatusResponse contains the current agent status
+message StatusResponse {
+  // Current mode: "normal", "restore", or "idle"
+  string mode = 1;
+
+  // Main process PID (0 if not found)
+  int32 main_process_pid = 2;
+
+  // Last checkpoint ID
+  string last_checkpoint_id = 3;
+
+  // Current checkpoint chain depth
+  int32 checkpoint_chain_depth = 4;
+
+  // Node name
+  string node_name = 5;
+
+  // Pod name
+  string pod_name = 6;
+
+  // Agent uptime in seconds
+  int64 uptime_seconds = 7;
+}
+
+// PageServerRequest contains parameters for starting page-server
+message PageServerRequest {
+  // Port to listen on
+  int32 port = 1;
+
+  // Directory containing checkpoint images
+  string checkpoint_dir = 2;
+
+  // Whether to run in daemon mode
+  bool daemon = 3;
+}
+
+// PageServerResponse contains the result of page-server start
+message PageServerResponse {
+  // Whether page-server started successfully
+  bool success = 1;
+
+  // Page-server PID
+  int32 pid = 2;
+
+  // Port it's listening on
+  int32 port = 3;
+}

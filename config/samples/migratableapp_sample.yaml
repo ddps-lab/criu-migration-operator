@@ -1,0 +1,64 @@
+apiVersion: migration.io/v1alpha1
+kind: MigratableApp
+metadata:
+  name: sample-web-app
+  namespace: default
+spec:
+  # Pod template (similar to Deployment spec)
+  template:
+    metadata:
+      labels:
+        app: sample-web
+    spec:
+      containers:
+      - name: app
+        image: python:3.9-slim
+        command: ["python", "-c"]
+        args:
+        - |
+          import time
+          import signal
+          import sys
+
+          counter = 0
+
+          def signal_handler(sig, frame):
+              print(f'Exiting gracefully at counter={counter}')
+              sys.exit(0)
+
+          signal.signal(signal.SIGTERM, signal_handler)
+          signal.signal(signal.SIGINT, signal_handler)
+
+          print("Starting sample web application...")
+          while True:
+              counter += 1
+              print(f"Counter: {counter}")
+              time.sleep(5)
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+
+  # Checkpoint policy
+  checkpointPolicy:
+    interval: "30s"
+    autoAdjust: true
+    memoryThresholdMB: 50
+    maxCheckpointChainDepth: 10
+
+  # Migration policy
+  migrationPolicy:
+    autoMigrate: true
+    preferOnDemand: true
+    migrationTimeoutSeconds: 300
+
+  # Object storage configuration
+  storage:
+    type: s3
+    bucket: criu-migration-checkpoints
+    endpoint: http://minio.default.svc.cluster.local:9000
+    region: us-east-1
+    credentialsSecret: s3-credentials
