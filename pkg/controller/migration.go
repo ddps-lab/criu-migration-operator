@@ -9,7 +9,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -163,7 +162,7 @@ func (r *MigratableAppReconciler) handleMigrationFailure(
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
-	logger.Error(fmt.Errorf(message), "Migration failed", "phase", phase)
+	logger.Error(fmt.Errorf("%s", message), "Migration failed", "phase", phase)
 
 	// Record failed migration
 	migrationRecord := migrationv1alpha1.MigrationRecord{
