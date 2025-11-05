@@ -45,56 +45,192 @@ This operator provides:
 └─────────────────────────────────────────────────────────┘
 ```
 
-## Features
-
-### Core Features
-- ✅ Zero-downtime migration for stateful applications
-- ✅ Automatic spot instance interrupt detection (AWS/GCP/Azure)
-- ✅ Incremental checkpoint chain for minimal overhead
-- ✅ Object storage integration (S3/MinIO/GCS)
-- ✅ Lazy page loading for fast restore
-- ✅ Kubernetes-native CRD API
-
-### Migration Policies
-- Configurable checkpoint intervals
-- Auto-adjustment based on memory changes
-- Target node selection (on-demand preference)
-- Migration timeout settings
-
 ## Prerequisites
 
-- Kubernetes cluster (v1.20+)
-- CRIU-capable container runtime (containerd recommended)
-- Object storage (S3, MinIO, or GCS)
-- Linux kernel with CRIU support (4.x+)
+### Development Environment
+- **Go**: 1.25.3+ (required for building)
+- **Docker**: For building container images
+- **Protobuf Compiler**: `protoc` (for generating gRPC code)
+- **controller-gen**: For generating CRD manifests
+- **kubectl**: For deploying to Kubernetes
+
+### Kubernetes Cluster
+- **Kubernetes**: v1.20+
+- **Container Runtime**: containerd (with CRIU support) or CRI-O
+- **Object Storage**: S3, MinIO, or GCS
+- **Linux Kernel**: 4.x+ (with CRIU support)
+
+## Building from Source
+
+### Step 1: Install Go Dependencies
+
+```bash
+# Install Go 1.25.3 or later
+# Ubuntu/Debian example:
+wget https://go.dev/dl/go1.25.3.linux-amd64.tar.gz
+sudo tar -C /usr/local -xzf go1.25.3.linux-amd64.tar.gz
+export PATH=$PATH:/usr/local/go/bin
+export PATH=$PATH:$(go env GOPATH)/bin
+source /etc/profile  # Or add to ~/.bashrc
+```
+
+### Step 2: Install Build Tools
+
+```bash
+# Install protobuf compiler
+sudo apt update && sudo apt install -y protobuf-compiler
+
+# Install Go tools
+go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+go install sigs.k8s.io/controller-tools/cmd/controller-gen@latest
+```
+
+### Step 3: Download Dependencies
+
+```bash
+cd kubernetes_integration
+go mod download
+go mod tidy
+```
+
+### Step 4: Generate Code
+
+```bash
+# Generate protobuf code
+./scripts/generate-proto.sh
+
+# Or generate manually:
+export PATH=$PATH:$(go env GOPATH)/bin
+protoc \
+  --go_out=. \
+  --go_opt=paths=source_relative \
+  --go-grpc_out=. \
+  --go-grpc_opt=paths=source_relative \
+  pkg/proto/agent.proto
+```
+
+### Step 5: Generate Kubernetes Manifests
+
+```bash
+# Generate CRD manifests
+make manifests
+
+# This creates:
+# - config/crd/migration.io_migratableapps.yaml
+# - config/rbac/role.yaml
+```
+
+### Step 6: Build Binaries
+
+```bash
+# Build all binaries
+make build
+
+# Output:
+# - bin/agent         (CRIU Agent)
+# - bin/controller    (Migration Controller)
+# - bin/node-monitor  (Node Monitor)
+```
+
+### Step 7: Build Docker Images
+
+```bash
+# Download CRIU binary and build all images
+make docker-build
+
+# This will:
+# 1. Download CRIU binary from S3
+# 2. Build agent image (with CRIU)
+# 3. Build controller image
+# 4. Build node-monitor image
+
+# Images created:
+# - 192.168.0.253:5000/criu-agent:latest
+# - 192.168.0.253:5000/criu-migration-controller:latest
+# - 192.168.0.253:5000/criu-node-monitor:latest
+```
+
+### Step 8: Push to Registry (Optional)
+
+```bash
+# Push all images to registry
+make docker-push
+
+# Or customize registry:
+make docker-push REGISTRY=your-registry.com/yourorg
+```
+
+## Complete Build Workflow
+
+```bash
+# Full build from scratch
+source /etc/profile
+cd kubernetes_integration
+
+# 1. Install dependencies
+go mod tidy
+
+# 2. Generate code
+./scripts/generate-proto.sh
+make manifests
+
+# 3. Build binaries
+make build
+
+# 4. Build and push Docker images
+make docker-push
+```
 
 ## Installation
 
-### 1. Install CRDs
+### Method 1: Using Makefile (Recommended)
 
 ```bash
-kubectl apply -f config/crd/
+# 1. Install CRDs
+make install
+
+# 2. Deploy controller and monitor
+make deploy
+
+# 3. Create storage credentials (see below)
 ```
 
-### 2. Create namespace and RBAC
+### Method 2: Manual Installation
+
+#### Step 1: Install CRDs
+
+```bash
+kubectl apply -f config/crd/migration.io_migratableapps.yaml
+```
+
+#### Step 2: Create Namespace and RBAC
 
 ```bash
 kubectl apply -f config/rbac/rbac.yaml
 ```
 
-### 3. Deploy controller and node monitor
+#### Step 3: Deploy Controller and Node Monitor
 
 ```bash
 kubectl apply -f config/manager/manager.yaml
 ```
 
-### 4. Configure object storage credentials
+#### Step 4: Configure Object Storage Credentials
 
+**For AWS S3:**
 ```bash
-# Create S3 credentials secret
 kubectl create secret generic s3-credentials \
   --from-literal=AWS_ACCESS_KEY_ID=your-access-key \
   --from-literal=AWS_SECRET_ACCESS_KEY=your-secret-key \
+  -n default
+```
+
+**For MinIO:**
+```bash
+kubectl create secret generic s3-credentials \
+  --from-literal=AWS_ACCESS_KEY_ID=minioadmin \
+  --from-literal=AWS_SECRET_ACCESS_KEY=minioadmin \
   -n default
 ```
 
@@ -103,15 +239,17 @@ kubectl create secret generic s3-credentials \
 ### 1. Create a MigratableApp
 
 ```yaml
+# example-app.yaml
 apiVersion: migration.io/v1alpha1
 kind: MigratableApp
 metadata:
-  name: my-app
+  name: my-web-app
+  namespace: default
 spec:
   template:
     metadata:
       labels:
-        app: my-app
+        app: my-web-app
     spec:
       containers:
       - name: app
@@ -125,15 +263,21 @@ spec:
               counter += 1
               print(f"Counter: {counter}")
               time.sleep(5)
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
 
   checkpointPolicy:
     interval: "30s"
     autoAdjust: true
     memoryThresholdMB: 100
+    maxCheckpointChainDepth: 10
 
   migrationPolicy:
     autoMigrate: true
     preferOnDemand: true
+    migrationTimeoutSeconds: 300
 
   storage:
     type: s3
@@ -143,45 +287,66 @@ spec:
     credentialsSecret: s3-credentials
 ```
 
-### 2. Apply the resource
+### 2. Deploy the Application
 
 ```bash
-kubectl apply -f my-app.yaml
+kubectl apply -f example-app.yaml
 ```
 
-### 3. Monitor the application
+### 3. Monitor the Application
 
 ```bash
-# Watch the MigratableApp
-kubectl get mapp my-app -w
+# Watch MigratableApp status
+kubectl get mapp my-web-app -w
 
-# Check status
-kubectl describe mapp my-app
+# Get detailed status
+kubectl describe mapp my-web-app
 
-# View migration history
-kubectl get mapp my-app -o jsonpath='{.status.migrationHistory}' | jq
+# View logs
+kubectl logs -l migration.io/app=my-web-app -c criu-agent
+kubectl logs -l migration.io/app=my-web-app -c app
 ```
 
-## Usage Examples
-
-### Manual Migration Trigger
+### 4. Check Checkpoint Status
 
 ```bash
-# Trigger manual migration by adding annotation
-kubectl annotate pod my-app migration.io/trigger=requested
-kubectl annotate pod my-app migration.io/reason=manual
+# View checkpoint information
+kubectl get mapp my-web-app -o jsonpath='{.status.checkpointStatus}' | jq
+
+# Output example:
+# {
+#   "lastCheckpointID": "abc123-1234567890",
+#   "lastCheckpointTime": "2024-11-05T08:00:00Z",
+#   "checkpointChainDepth": 3,
+#   "checkpointChainRoot": "xyz789-1234567890"
+# }
 ```
 
-### Check Checkpoint Status
+### 5. View Migration History
 
 ```bash
-kubectl get mapp my-app -o jsonpath='{.status.checkpointStatus}' | jq
+kubectl get mapp my-web-app -o jsonpath='{.status.migrationHistory}' | jq
+
+# Output example:
+# [
+#   {
+#     "fromNode": "node-1",
+#     "toNode": "node-2",
+#     "timestamp": "2024-11-05T08:05:00Z",
+#     "reason": "spot-interrupt",
+#     "duration": "15.2s",
+#     "success": true
+#   }
+# ]
 ```
 
-### View Migration History
+### 6. Trigger Manual Migration
 
 ```bash
-kubectl get mapp my-app -o yaml | yq '.status.migrationHistory'
+# Add migration trigger annotation
+POD_NAME=$(kubectl get pod -l migration.io/app=my-web-app -o jsonpath='{.items[0].metadata.name}')
+kubectl annotate pod $POD_NAME migration.io/trigger=requested
+kubectl annotate pod $POD_NAME migration.io/reason=manual
 ```
 
 ## Configuration
@@ -223,8 +388,7 @@ migrationPolicy:
 
 ### Storage Configuration
 
-#### AWS S3
-
+**AWS S3:**
 ```yaml
 storage:
   type: s3
@@ -233,8 +397,7 @@ storage:
   credentialsSecret: aws-credentials
 ```
 
-#### MinIO
-
+**MinIO:**
 ```yaml
 storage:
   type: minio
@@ -244,8 +407,7 @@ storage:
   credentialsSecret: minio-credentials
 ```
 
-#### GCS
-
+**GCS:**
 ```yaml
 storage:
   type: gcs
@@ -253,49 +415,105 @@ storage:
   credentialsSecret: gcs-credentials
 ```
 
-## Development
-
-### Build
+## Makefile Targets
 
 ```bash
-# Build all binaries
-make build
+# Development
+make help              # Show all available targets
+make generate          # Generate protobuf and deepcopy code
+make fmt               # Format Go code
+make vet               # Run Go vet
+make test              # Run tests
 
-# Build Docker images
-make docker-build
+# Build
+make build             # Build binaries (agent, controller, node-monitor)
 
-# Push images
-make docker-push
+# Docker
+make download-criu     # Download CRIU binary from S3
+make docker-build      # Build Docker images (includes download-criu)
+make docker-push       # Build and push Docker images
+
+# Deployment
+make manifests         # Generate CRD and RBAC manifests
+make install           # Install CRDs to cluster
+make uninstall         # Uninstall CRDs from cluster
+make deploy            # Deploy controller and monitor
+make undeploy          # Remove controller and monitor
+
+# Dependencies
+make controller-gen    # Install controller-gen
+make protoc-gen-go     # Install protoc-gen-go
+make protoc-gen-go-grpc # Install protoc-gen-go-grpc
 ```
 
-### Generate Code
+## Customization
+
+### Custom CRIU Binary
 
 ```bash
-# Generate protobuf code
-./scripts/generate-proto.sh
-
-# Generate CRD manifests
-make manifests
-
-# Generate deepcopy code
-make generate
+# Use custom CRIU binary URL
+make docker-build CRIU_URL=https://your-server.com/criu
 ```
 
-### Testing
+### Custom Registry
 
 ```bash
-# Run tests
-make test
+# Use different registry
+make docker-build REGISTRY=your-registry.com/yourorg
+make docker-push REGISTRY=your-registry.com/yourorg
+```
 
-# Run with local Kubernetes cluster (kind/minikube)
-make install
-make run
+### Custom Image Tags
+
+Edit the Makefile:
+```makefile
+AGENT_IMG ?= $(REGISTRY)/criu-agent:v1.0.0
+CONTROLLER_IMG ?= $(REGISTRY)/criu-migration-controller:v1.0.0
+MONITOR_IMG ?= $(REGISTRY)/criu-node-monitor:v1.0.0
 ```
 
 ## Troubleshooting
 
-### Agent Connection Failed
+### Build Issues
 
+**Problem: `go: command not found`**
+```bash
+# Install Go and add to PATH
+export PATH=$PATH:/usr/local/go/bin
+export PATH=$PATH:$(go env GOPATH)/bin
+source /etc/profile
+```
+
+**Problem: `protoc: command not found`**
+```bash
+# Install protobuf compiler
+sudo apt install -y protobuf-compiler
+```
+
+**Problem: `controller-gen: command not found`**
+```bash
+# Install controller-gen
+go install sigs.k8s.io/controller-tools/cmd/controller-gen@latest
+```
+
+### Docker Build Issues
+
+**Problem: CRIU download fails**
+```bash
+# Check CRIU URL and download manually
+curl -L -o criu/criu https://mhsong-criu-s3-data.s3.us-west-2.amazonaws.com/criu
+chmod +x criu/criu
+```
+
+**Problem: Go version mismatch in Docker**
+```bash
+# Dockerfiles use golang:1.25.3-alpine
+# Make sure go.mod requires go >= 1.25.1
+```
+
+### Runtime Issues
+
+**Problem: Agent connection failed**
 ```bash
 # Check agent pod logs
 kubectl logs <pod-name> -c criu-agent
@@ -304,34 +522,73 @@ kubectl logs <pod-name> -c criu-agent
 kubectl exec <pod-name> -c criu-agent -- ps aux | grep agent
 ```
 
-### Checkpoint Failed
-
+**Problem: Checkpoint failed**
 ```bash
 # Check CRIU logs in the pod
+kubectl exec <pod-name> -c criu-agent -- ls /checkpoints
 kubectl exec <pod-name> -c criu-agent -- cat /checkpoints/<dump-id>/criu.log
 
 # Verify CRIU is available
-kubectl exec <pod-name> -c criu-agent -- criu check
+kubectl exec <pod-name> -c criu-agent -- criu check --all
 ```
 
-### Migration Timeout
-
+**Problem: Migration timeout**
 ```bash
 # Increase migration timeout
 kubectl edit mapp <app-name>
 # Set spec.migrationPolicy.migrationTimeoutSeconds to higher value
-
-# Check controller logs
-kubectl logs -n migration-system deployment/migration-controller
 ```
 
-### S3 Upload Failed
+## Project Structure
 
-```bash
-# Verify S3 credentials
-kubectl get secret s3-credentials -o yaml
-
-# Test S3 connectivity from pod
-kubectl exec <pod-name> -c criu-agent -- \
-  aws s3 ls s3://<bucket-name> --endpoint-url <endpoint>
 ```
+kubernetes_integration/
+├── api/v1alpha1/              # CRD API definitions
+├── cmd/                        # Main applications
+│   ├── agent/                 # CRIU Agent
+│   ├── controller/            # Migration Controller
+│   └── node-monitor/          # Node Monitor
+├── pkg/                        # Libraries
+│   ├── agent/                 # Agent implementation
+│   ├── controller/            # Controller implementation
+│   ├── scheduler/             # Checkpoint scheduler
+│   ├── monitor/               # Spot monitor
+│   └── proto/                 # gRPC definitions
+├── config/                     # Kubernetes manifests
+│   ├── crd/                   # CRD definitions
+│   ├── rbac/                  # RBAC configs
+│   ├── manager/               # Controller deployment
+│   └── samples/               # Example applications
+├── deploy/                     # Dockerfiles
+│   ├── agent/
+│   ├── controller/
+│   └── node-monitor/
+├── scripts/                    # Build scripts
+├── Makefile                    # Build automation
+└── README.md                   # This file
+```
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+## License
+
+Apache License 2.0
+
+## References
+
+- [CRIU Documentation](https://criu.org/)
+- [Kubernetes Operator Pattern](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/)
+- [controller-runtime](https://github.com/kubernetes-sigs/controller-runtime)
+- [Kubebuilder](https://book.kubebuilder.io/)
+
+## Contact
+
+For questions or support:
+- GitHub: [github.com/ddps-lab/criu-migration-operator](https://github.com/ddps-lab/criu-migration-operator)
+- Issues: [GitHub Issues](https://github.com/ddps-lab/criu-migration-operator/issues)
