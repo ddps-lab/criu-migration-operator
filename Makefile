@@ -72,7 +72,7 @@ docker-push: docker-build ## Push docker images.
 ##@ Deployment
 
 manifests: ## Generate Kubernetes manifests.
-	controller-gen crd paths="./api/..." output:crd:artifacts:config=config/crd
+	controller-gen crd:maxDescLen=0 paths="./api/..." output:crd:artifacts:config=config/crd
 	controller-gen rbac:roleName=migration-controller paths="./pkg/controller/..." output:rbac:artifacts:config=config/rbac
 
 install: manifests ## Install CRDs into the K8s cluster.
@@ -84,7 +84,11 @@ uninstall: ## Uninstall CRDs from the K8s cluster.
 deploy: manifests ## Deploy controller to the K8s cluster.
 	kubectl apply -f config/crd/
 	kubectl apply -f config/rbac/
-	kubectl apply -f config/manager/
+	@echo "Deploying with registry: $(REGISTRY)"
+	@cat config/manager/manager.yaml | \
+		sed 's|ghcr.io/ddps-lab/criu-migration-controller:latest|$(CONTROLLER_IMG)|g' | \
+		sed 's|ghcr.io/ddps-lab/criu-node-monitor:latest|$(MONITOR_IMG)|g' | \
+		kubectl apply -f -
 
 undeploy: ## Undeploy controller from the K8s cluster.
 	kubectl delete -f config/manager/ --ignore-not-found

@@ -13,6 +13,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	migrationv1alpha1 "github.com/ddps-lab/criu-migration-operator/api/v1alpha1"
 	"github.com/ddps-lab/criu-migration-operator/pkg/controller"
@@ -48,9 +49,13 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:           scheme,
-		LeaderElection:   enableLeaderElection,
-		LeaderElectionID: "migration-controller.migration.io",
+		Scheme: scheme,
+		Metrics: metricsserver.Options{
+			BindAddress: metricsAddr,
+		},
+		HealthProbeBindAddress: probeAddr,
+		LeaderElection:         enableLeaderElection,
+		LeaderElectionID:       "migration-controller.migration.io",
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")

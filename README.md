@@ -184,17 +184,27 @@ make docker-push
 
 ## Installation
 
+### Prerequisites
+- Kubernetes cluster running (v1.20+)
+- `kubectl` configured to access the cluster
+- Docker images pushed to registry (or use `make docker-push`)
+
 ### Method 1: Using Makefile (Recommended)
 
 ```bash
 # 1. Install CRDs
 make install
 
-# 2. Deploy controller and monitor
+# 2. Deploy namespace, RBAC, controller and monitor
 make deploy
+
+# Or with custom registry:
+make deploy REGISTRY=192.168.0.253:5000
 
 # 3. Create storage credentials (see below)
 ```
+
+**Note**: The `make deploy` command will automatically substitute the correct image references based on the REGISTRY variable. If you built and pushed images with a custom registry (e.g., `make docker-push REGISTRY=192.168.0.253:5000`), use the same REGISTRY value when deploying.
 
 ### Method 2: Manual Installation
 
@@ -204,19 +214,38 @@ make deploy
 kubectl apply -f config/crd/migration.io_migratableapps.yaml
 ```
 
-#### Step 2: Create Namespace and RBAC
+#### Step 2: Create Namespace, ServiceAccount and RBAC
 
 ```bash
+# This will create:
+# - Namespace: migration-system
+# - ServiceAccount: migration-controller
+# - ClusterRole and ClusterRoleBinding
+# - Leader election Role and RoleBinding
 kubectl apply -f config/rbac/rbac.yaml
 ```
 
 #### Step 3: Deploy Controller and Node Monitor
 
 ```bash
+# Deploy the controller deployment and node-monitor daemonset
 kubectl apply -f config/manager/manager.yaml
 ```
 
-#### Step 4: Configure Object Storage Credentials
+#### Step 4: Verify Installation
+
+```bash
+# Check if pods are running
+kubectl get pods -n migration-system
+
+# Expected output:
+# NAME                                     READY   STATUS    RESTARTS   AGE
+# migration-controller-xxxxxxxxxx-xxxxx    1/1     Running   0          30s
+# node-monitor-xxxxx                       1/1     Running   0          30s
+# node-monitor-yyyyy                       1/1     Running   0          30s
+```
+
+#### Step 5: Configure Object Storage Credentials
 
 **For AWS S3:**
 ```bash
@@ -458,10 +487,20 @@ make docker-build CRIU_URL=https://your-server.com/criu
 ### Custom Registry
 
 ```bash
-# Use different registry
-make docker-build REGISTRY=your-registry.com/yourorg
+# Build and push with custom registry
 make docker-push REGISTRY=your-registry.com/yourorg
+
+# Deploy with same custom registry
+make deploy REGISTRY=your-registry.com/yourorg
+
+# Complete workflow:
+make docker-push REGISTRY=192.168.0.253:5000
+make deploy REGISTRY=192.168.0.253:5000
 ```
+
+The `REGISTRY` variable affects:
+- **docker-build/docker-push**: Sets the image tags for building and pushing
+- **deploy**: Automatically replaces image references in deployment YAML before applying to cluster
 
 ### Custom Image Tags
 
