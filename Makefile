@@ -1,10 +1,15 @@
-.PHONY: all build test docker-build docker-push install uninstall generate manifests help
+.PHONY: all build test docker-build docker-push install uninstall generate manifests help download-criu
 
 # Image registry and tags
 REGISTRY ?= 192.168.0.253:5000
 AGENT_IMG ?= $(REGISTRY)/criu-agent:latest
 CONTROLLER_IMG ?= $(REGISTRY)/criu-migration-controller:latest
 MONITOR_IMG ?= $(REGISTRY)/criu-node-monitor:latest
+
+# CRIU binary URL
+CRIU_URL ?= https://mhsong-criu-s3-data.s3.us-west-2.amazonaws.com/criu
+CRIU_DIR = criu
+CRIU_BIN = $(CRIU_DIR)/criu
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -46,12 +51,20 @@ build: fmt vet ## Build binaries.
 
 ##@ Docker
 
-docker-build: ## Build docker images.
+download-criu: ## Download CRIU binary from S3.
+	@echo "Downloading CRIU binary from $(CRIU_URL)..."
+	@mkdir -p $(CRIU_DIR)
+	@curl -L -o $(CRIU_BIN) $(CRIU_URL)
+	@chmod +x $(CRIU_BIN)
+	@echo "CRIU binary downloaded to $(CRIU_BIN)"
+	@$(CRIU_BIN) --version || echo "Warning: CRIU version check failed"
+
+docker-build: download-criu ## Build docker images.
 	docker build -t ${AGENT_IMG} -f deploy/agent/Dockerfile .
 	docker build -t ${CONTROLLER_IMG} -f deploy/controller/Dockerfile .
 	docker build -t ${MONITOR_IMG} -f deploy/node-monitor/Dockerfile .
 
-docker-push: ## Push docker images.
+docker-push: docker-build ## Push docker images.
 	docker push ${AGENT_IMG}
 	docker push ${CONTROLLER_IMG}
 	docker push ${MONITOR_IMG}
