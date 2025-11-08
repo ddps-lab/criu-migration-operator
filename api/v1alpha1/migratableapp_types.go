@@ -8,6 +8,8 @@ import (
 // MigratableAppSpec defines the desired state of MigratableApp
 type MigratableAppSpec struct {
 	// Template defines the pod template for the application
+	// +kubebuilder:pruning:PreserveUnknownFields
+	// +kubebuilder:validation:XPreserveUnknownFields
 	Template corev1.PodTemplateSpec `json:"template"`
 
 	// CheckpointPolicy defines checkpoint behavior
@@ -66,14 +68,25 @@ type StorageConfig struct {
 	// Bucket name for storing checkpoints
 	Bucket string `json:"bucket"`
 
-	// Endpoint URL (for S3-compatible storage)
+	// Endpoint URL (for S3-compatible storage, used for upload)
 	Endpoint string `json:"endpoint,omitempty"`
+
+	// DownloadEndpoint URL (for CDN like CloudFront, used for CRIU restore)
+	// If not specified, Endpoint will be used for both upload and download
+	DownloadEndpoint string `json:"downloadEndpoint,omitempty"`
 
 	// Region for cloud storage
 	Region string `json:"region,omitempty"`
 
 	// CredentialsSecret references a secret containing storage credentials
 	CredentialsSecret string `json:"credentialsSecret,omitempty"`
+
+	// ExpressOneZone enables S3 Express One Zone optimization
+	ExpressOneZone bool `json:"expressOneZone,omitempty"`
+
+	// AsyncPrefetch enables asynchronous prefetching in lazy-pages
+	// +kubebuilder:default=false
+	AsyncPrefetch bool `json:"asyncPrefetch,omitempty"`
 }
 
 // MigratableAppStatus defines the observed state of MigratableApp

@@ -24,8 +24,11 @@ spec:
       serviceAccountName: migration-controller
       containers:
       - name: controller
-        image: ghcr.io/ddps-lab/criu-migration-controller:latest
+        image: REGISTRY/CONTROLLER_IMAGE
         imagePullPolicy: Always
+        env:
+        - name: AGENT_IMAGE
+          value: "REGISTRY/AGENT_IMAGE"
         args:
         - --leader-elect
         - --metrics-bind-address=:8080
@@ -76,7 +79,7 @@ spec:
       hostNetwork: true
       containers:
       - name: monitor
-        image: ghcr.io/ddps-lab/criu-node-monitor:latest
+        image: REGISTRY/MONITOR_IMAGE
         imagePullPolicy: Always
         env:
         - name: NODE_NAME

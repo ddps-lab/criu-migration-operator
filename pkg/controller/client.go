@@ -60,13 +60,14 @@ func (c *AgentClient) FinalDump(ctx context.Context, pageServerAddr string, page
 }
 
 // Restore calls the agent's Restore RPC
-func (c *AgentClient) Restore(ctx context.Context, dumpID, s3Bucket, s3Prefix string) (*pb.RestoreResponse, error) {
+func (c *AgentClient) Restore(ctx context.Context, dumpID, s3Bucket, s3Prefix, sourceAddr string) (*pb.RestoreResponse, error) {
 	return c.client.Restore(ctx, &pb.RestoreRequest{
 		DumpId:         dumpID,
 		S3Bucket:       s3Bucket,
 		S3Prefix:       s3Prefix,
 		UseLazyPages:   true,
 		PageServerPort: 9999,
+		SourceAddr:     sourceAddr, // Source pod IP for lazy-pages connection
 	})
 }
 

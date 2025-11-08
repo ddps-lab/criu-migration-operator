@@ -74,12 +74,19 @@ spec:
                 type: object
               storage:
                 properties:
+                  asyncPrefetch:
+                    default: false
+                    type: boolean
                   bucket:
                     type: string
                   credentialsSecret:
                     type: string
+                  downloadEndpoint:
+                    type: string
                   endpoint:
                     type: string
+                  expressOneZone:
+                    type: boolean
                   region:
                     type: string
                   type:
@@ -93,8 +100,10 @@ spec:
                 - type
                 type: object
               template:
+                x-kubernetes-preserve-unknown-fields: true
                 properties:
                   metadata:
+                    x-kubernetes-preserve-unknown-fields: true
                     type: object
                   spec:
                     properties:
@@ -3867,6 +3876,7 @@ spec:
                     - containers
                     type: object
                 type: object
+                x-kubernetes-preserve-unknown-fields: true
             required:
             - storage
             - template

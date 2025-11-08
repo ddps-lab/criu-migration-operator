@@ -29,8 +29,12 @@ type Agent struct {
 
 // NewAgent creates a new CRIU agent
 func NewAgent(workDir, s3Bucket, s3Endpoint, s3Region, mode, podName, nodeName string) (*Agent, error) {
-	// Create S3 client
-	s3Client, err := NewS3Client(s3Bucket, s3Endpoint, s3Region)
+	// Read additional S3 options from environment
+	downloadEndpoint := os.Getenv("DOWNLOAD_ENDPOINT")
+	expressOneZone := os.Getenv("EXPRESS_ONE_ZONE") == "true"
+
+	// Create S3 client with advanced options
+	s3Client, err := NewS3ClientWithOptions(s3Bucket, s3Endpoint, downloadEndpoint, s3Region, expressOneZone)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create S3 client: %w", err)
 	}
@@ -166,6 +170,7 @@ func (a *Agent) Restore(ctx context.Context, req *pb.RestoreRequest) (*pb.Restor
 		req.S3Prefix,
 		req.UseLazyPages,
 		int(req.PageServerPort),
+		req.SourceAddr, // Source pod IP for lazy-pages connection
 	)
 	if err != nil {
 		return nil, fmt.Errorf("restore failed: %w", err)
@@ -226,21 +231,18 @@ func (a *Agent) GetStatus(ctx context.Context, req *pb.StatusRequest) (*pb.Statu
 }
 
 // StartPageServer implements the gRPC StartPageServer method
+// Note: This is deprecated - lazy-pages is started automatically during Restore
 func (a *Agent) StartPageServer(ctx context.Context, req *pb.PageServerRequest) (*pb.PageServerResponse, error) {
-	log.Printf("Received StartPageServer request (port: %d, dir: %s)", req.Port, req.CheckpointDir)
+	log.Printf("Received StartPageServer request (port: %d, dir: %s) - DEPRECATED", req.Port, req.CheckpointDir)
 
-	pid, err := a.restoreMgr.StartPageServer(ctx, int(req.Port), req.CheckpointDir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to start page-server: %w", err)
-	}
-
-	log.Printf("Page-server started successfully (PID: %d, port: %d)", pid, req.Port)
-
+	// StartPageServer now requires sourceAddr parameter
+	// This RPC method is deprecated and should not be used directly
+	// lazy-pages is automatically started during Restore
 	return &pb.PageServerResponse{
-		Success: true,
-		Pid:     int32(pid),
+		Success: false,
+		Pid:     0,
 		Port:    req.Port,
-	}, nil
+	}, fmt.Errorf("StartPageServer is deprecated - lazy-pages is started automatically during Restore")
 }
 
 // performRestoreOnStartup performs restore operation on agent startup
@@ -248,12 +250,17 @@ func (a *Agent) performRestoreOnStartup(ctx context.Context) error {
 	// Get restore configuration from environment
 	checkpointID := os.Getenv("CHECKPOINT_ID")
 	s3Prefix := os.Getenv("S3_PREFIX")
+	sourceAddr := os.Getenv("SOURCE_POD_IP")
 
 	if checkpointID == "" || s3Prefix == "" {
 		return fmt.Errorf("CHECKPOINT_ID or S3_PREFIX not set")
 	}
 
-	log.Printf("Performing restore on startup (checkpoint: %s)", checkpointID)
+	if sourceAddr == "" {
+		return fmt.Errorf("SOURCE_POD_IP not set for lazy-pages connection")
+	}
+
+	log.Printf("Performing restore on startup (checkpoint: %s, source: %s)", checkpointID, sourceAddr)
 
 	// Wait for sleep process to appear
 	sleepPID, err := a.checkpointMgr.WaitForSleepProcess(10 * time.Second)
@@ -264,7 +271,7 @@ func (a *Agent) performRestoreOnStartup(ctx context.Context) error {
 	log.Printf("Found sleep process (PID: %d), starting restore...", sleepPID)
 
 	// Perform restore with lazy pages
-	result, err := a.restoreMgr.Restore(ctx, checkpointID, s3Prefix, true, 9999)
+	result, err := a.restoreMgr.Restore(ctx, checkpointID, s3Prefix, true, 9999, sourceAddr)
 	if err != nil {
 		return fmt.Errorf("restore failed: %w", err)
 	}

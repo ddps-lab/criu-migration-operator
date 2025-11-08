@@ -2,9 +2,12 @@
 
 # Image registry and tags
 REGISTRY ?= 192.168.0.253:5000
-AGENT_IMG ?= $(REGISTRY)/criu-agent:latest
-CONTROLLER_IMG ?= $(REGISTRY)/criu-migration-controller:latest
-MONITOR_IMG ?= $(REGISTRY)/criu-node-monitor:latest
+AGENT_IMAGE ?= criu-agent
+CONTROLLER_IMAGE ?= criu-migration-controller
+MONITOR_IMAGE ?= criu-node-monitor
+AGENT_IMG ?= $(REGISTRY)/$(AGENT_IMAGE):latest
+CONTROLLER_IMG ?= $(REGISTRY)/$(CONTROLLER_IMAGE):latest
+MONITOR_IMG ?= $(REGISTRY)/$(MONITOR_IMAGE):latest
 
 # CRIU binary URL
 CRIU_URL ?= https://mhsong-criu-s3-data.s3.us-west-2.amazonaws.com/criu
@@ -74,6 +77,9 @@ docker-push: docker-build ## Push docker images.
 manifests: ## Generate Kubernetes manifests.
 	controller-gen crd:maxDescLen=0 paths="./api/..." output:crd:artifacts:config=config/crd
 	controller-gen rbac:roleName=migration-controller paths="./pkg/controller/..." output:rbac:artifacts:config=config/rbac
+	@echo "Patching CRD to preserve unknown fields in template..."
+	@sed -i '/^              template:/a\                x-kubernetes-preserve-unknown-fields: true' config/crd/migration.io_migratableapps.yaml
+	@sed -i '/^                  metadata:/a\                    x-kubernetes-preserve-unknown-fields: true' config/crd/migration.io_migratableapps.yaml
 
 install: manifests ## Install CRDs into the K8s cluster.
 	kubectl apply -f config/crd/
@@ -86,8 +92,9 @@ deploy: manifests ## Deploy controller to the K8s cluster.
 	kubectl apply -f config/rbac/
 	@echo "Deploying with registry: $(REGISTRY)"
 	@cat config/manager/manager.yaml | \
-		sed 's|ghcr.io/ddps-lab/criu-migration-controller:latest|$(CONTROLLER_IMG)|g' | \
-		sed 's|ghcr.io/ddps-lab/criu-node-monitor:latest|$(MONITOR_IMG)|g' | \
+		sed 's|REGISTRY/AGENT_IMAGE|$(AGENT_IMG)|g' | \
+		sed 's|REGISTRY/CONTROLLER_IMAGE|$(CONTROLLER_IMG)|g' | \
+		sed 's|REGISTRY/MONITOR_IMAGE|$(MONITOR_IMG)|g' | \
 		kubectl apply -f -
 
 undeploy: ## Undeploy controller from the K8s cluster.

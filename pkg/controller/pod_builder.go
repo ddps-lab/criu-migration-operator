@@ -2,6 +2,7 @@ package controller
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 
 	migrationv1alpha1 "github.com/ddps-lab/criu-migration-operator/api/v1alpha1"
@@ -10,19 +11,41 @@ import (
 )
 
 const (
-	AgentImage = "criu-agent:latest" // TODO: Make this configurable
-	AgentPort  = 8080
-	WorkDir    = "/checkpoints"
+	AgentPort = 8080
+	WorkDir   = "/checkpoints"
 )
+
+var (
+	// AgentImage can be overridden via AGENT_IMAGE environment variable
+	AgentImage = getAgentImage()
+)
+
+func getAgentImage() string {
+	if img := os.Getenv("AGENT_IMAGE"); img != "" {
+		return img
+	}
+	return "criu-agent:latest"
+}
 
 // PodBuilder builds Pod specs for MigratableApp
 type PodBuilder struct {
-	mapp *migrationv1alpha1.MigratableApp
+	mapp         *migrationv1alpha1.MigratableApp
+	awsAccessKey string
+	awsSecretKey string
 }
 
 // NewPodBuilder creates a new PodBuilder
 func NewPodBuilder(mapp *migrationv1alpha1.MigratableApp) *PodBuilder {
 	return &PodBuilder{mapp: mapp}
+}
+
+// NewPodBuilderWithCredentials creates a PodBuilder with AWS credentials
+func NewPodBuilderWithCredentials(mapp *migrationv1alpha1.MigratableApp, awsAccessKey, awsSecretKey string) *PodBuilder {
+	return &PodBuilder{
+		mapp:         mapp,
+		awsAccessKey: awsAccessKey,
+		awsSecretKey: awsSecretKey,
+	}
 }
 
 // BuildNormalPod builds a pod spec for normal mode (not restore)
@@ -32,7 +55,7 @@ func (b *PodBuilder) BuildNormalPod(generation int) *corev1.Pod {
 }
 
 // BuildRestorePod builds a pod spec for restore mode
-func (b *PodBuilder) BuildRestorePod(generation int, checkpointID, sourceNode string) *corev1.Pod {
+func (b *PodBuilder) BuildRestorePod(generation int, checkpointID, sourceNode string, s3Prefix string) *corev1.Pod {
 	pod := b.buildBasePod(generation, "restore")
 
 	// Add restore-specific annotations
@@ -41,6 +64,7 @@ func (b *PodBuilder) BuildRestorePod(generation int, checkpointID, sourceNode st
 	}
 	pod.Annotations["migration.io/checkpoint-id"] = checkpointID
 	pod.Annotations["migration.io/source-node"] = sourceNode
+	pod.Annotations["migration.io/s3-prefix"] = s3Prefix
 
 	// Modify app container CMD to sleep
 	for i := range pod.Spec.Containers {
@@ -179,48 +203,80 @@ func (b *PodBuilder) buildBasePod(generation int, mode string) *corev1.Pod {
 
 // buildAgentContainer builds the CRIU agent sidecar container
 func (b *PodBuilder) buildAgentContainer(mode string) corev1.Container {
+	agentEnv := []corev1.EnvVar{
+		{
+			Name: "POD_NAME",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "metadata.name",
+				},
+			},
+		},
+		{
+			Name: "POD_NAMESPACE",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "metadata.namespace",
+				},
+			},
+		},
+		{
+			Name: "NODE_NAME",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "spec.nodeName",
+				},
+			},
+		},
+		{
+			Name:  "S3_BUCKET",
+			Value: b.mapp.Spec.Storage.Bucket,
+		},
+		{
+			Name:  "S3_ENDPOINT",
+			Value: b.mapp.Spec.Storage.Endpoint,
+		},
+		{
+			Name:  "S3_REGION",
+			Value: b.mapp.Spec.Storage.Region,
+		},
+		{
+			Name:  "DOWNLOAD_ENDPOINT",
+			Value: b.mapp.Spec.Storage.DownloadEndpoint,
+		},
+		{
+			Name:  "EXPRESS_ONE_ZONE",
+			Value: strconv.FormatBool(b.mapp.Spec.Storage.ExpressOneZone),
+		},
+		{
+			Name:  "ASYNC_PREFETCH",
+			Value: strconv.FormatBool(b.mapp.Spec.Storage.AsyncPrefetch),
+		},
+		{
+			Name:  "POD_GENERATION",
+			Value: strconv.Itoa(b.mapp.Status.Generation),
+		},
+	}
+
+	// Add AWS credentials if provided
+	if b.awsAccessKey != "" && b.awsSecretKey != "" {
+		agentEnv = append(agentEnv,
+			corev1.EnvVar{
+				Name:  "AWS_ACCESS_KEY_ID",
+				Value: b.awsAccessKey,
+			},
+			corev1.EnvVar{
+				Name:  "AWS_SECRET_ACCESS_KEY",
+				Value: b.awsSecretKey,
+			},
+		)
+	}
+
 	return corev1.Container{
 		Name:  "criu-agent",
 		Image: AgentImage,
 		Args:  []string{"--mode=" + mode},
-		Env: []corev1.EnvVar{
-			{
-				Name: "POD_NAME",
-				ValueFrom: &corev1.EnvVarSource{
-					FieldRef: &corev1.ObjectFieldSelector{
-						FieldPath: "metadata.name",
-					},
-				},
-			},
-			{
-				Name: "POD_NAMESPACE",
-				ValueFrom: &corev1.EnvVarSource{
-					FieldRef: &corev1.ObjectFieldSelector{
-						FieldPath: "metadata.namespace",
-					},
-				},
-			},
-			{
-				Name: "NODE_NAME",
-				ValueFrom: &corev1.EnvVarSource{
-					FieldRef: &corev1.ObjectFieldSelector{
-						FieldPath: "spec.nodeName",
-					},
-				},
-			},
-			{
-				Name:  "S3_BUCKET",
-				Value: b.mapp.Spec.Storage.Bucket,
-			},
-			{
-				Name:  "S3_ENDPOINT",
-				Value: b.mapp.Spec.Storage.Endpoint,
-			},
-			{
-				Name:  "S3_REGION",
-				Value: b.mapp.Spec.Storage.Region,
-			},
-		},
+		Env:   agentEnv,
 		Ports: []corev1.ContainerPort{
 			{
 				Name:          "grpc",

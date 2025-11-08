@@ -247,12 +247,14 @@ kubectl get pods -n migration-system
 
 #### Step 5: Configure Object Storage Credentials
 
+**Important**: Create the secret in the `migration-system` namespace (where the controller is deployed). The controller will automatically inject these credentials into all MigratableApp pods, regardless of which namespace they run in.
+
 **For AWS S3:**
 ```bash
 kubectl create secret generic s3-credentials \
   --from-literal=AWS_ACCESS_KEY_ID=your-access-key \
   --from-literal=AWS_SECRET_ACCESS_KEY=your-secret-key \
-  -n default
+  -n migration-system
 ```
 
 **For MinIO:**
@@ -260,8 +262,10 @@ kubectl create secret generic s3-credentials \
 kubectl create secret generic s3-credentials \
   --from-literal=AWS_ACCESS_KEY_ID=minioadmin \
   --from-literal=AWS_SECRET_ACCESS_KEY=minioadmin \
-  -n default
+  -n migration-system
 ```
+
+**Note**: Only one secret in `migration-system` namespace is needed. All MigratableApps in any namespace will use this secret.
 
 ## Quick Start
 

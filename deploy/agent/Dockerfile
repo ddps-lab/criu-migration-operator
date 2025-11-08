@@ -19,15 +19,23 @@ COPY cmd/agent/ cmd/agent/
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o agent cmd/agent/main.go
 
 # Runtime stage
-FROM alpine:3.18
+FROM ubuntu:24.04
 
 # Install CRIU runtime dependencies
-RUN apk add --no-cache \
+RUN apt-get update && apt-get install -y \
     ca-certificates \
-    libnet \
-    libnl3 \
-    protobuf-c \
-    && rm -rf /var/cache/apk/*
+    libprotobuf-c1 \
+    libnl-3-200 \
+    libnl-genl-3-200 \
+    libnet1 \
+    libcap2 \
+    libgnutls30 \
+    libnftables1 \
+    libbsd0 \
+    libdrm2 \
+    libcurl4 \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

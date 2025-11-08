@@ -299,8 +299,10 @@ type RestoreRequest struct {
 	UseLazyPages bool `protobuf:"varint,4,opt,name=use_lazy_pages,json=useLazyPages,proto3" json:"use_lazy_pages,omitempty"`
 	// Page-server port for lazy restore
 	PageServerPort int32 `protobuf:"varint,5,opt,name=page_server_port,json=pageServerPort,proto3" json:"page_server_port,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Source pod IP address (for lazy-pages to connect to)
+	SourceAddr    string `protobuf:"bytes,6,opt,name=source_addr,json=sourceAddr,proto3" json:"source_addr,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RestoreRequest) Reset() {
@@ -366,6 +368,13 @@ func (x *RestoreRequest) GetPageServerPort() int32 {
 		return x.PageServerPort
 	}
 	return 0
+}
+
+func (x *RestoreRequest) GetSourceAddr() string {
+	if x != nil {
+		return x.SourceAddr
+	}
+	return ""
 }
 
 // RestoreResponse contains the result of restore
@@ -729,13 +738,15 @@ const file_pkg_proto_agent_proto_rawDesc = "" +
 	"\x11FinalDumpResponse\x12\x17\n" +
 	"\adump_id\x18\x01 \x01(\tR\x06dumpId\x12\x1c\n" +
 	"\ttimestamp\x18\x02 \x01(\x03R\ttimestamp\x12.\n" +
-	"\x13metadata_size_bytes\x18\x03 \x01(\x03R\x11metadataSizeBytes\"\xb3\x01\n" +
+	"\x13metadata_size_bytes\x18\x03 \x01(\x03R\x11metadataSizeBytes\"\xd4\x01\n" +
 	"\x0eRestoreRequest\x12\x17\n" +
 	"\adump_id\x18\x01 \x01(\tR\x06dumpId\x12\x1b\n" +
 	"\ts3_bucket\x18\x02 \x01(\tR\bs3Bucket\x12\x1b\n" +
 	"\ts3_prefix\x18\x03 \x01(\tR\bs3Prefix\x12$\n" +
 	"\x0euse_lazy_pages\x18\x04 \x01(\bR\fuseLazyPages\x12(\n" +
-	"\x10page_server_port\x18\x05 \x01(\x05R\x0epageServerPort\"\x83\x01\n" +
+	"\x10page_server_port\x18\x05 \x01(\x05R\x0epageServerPort\x12\x1f\n" +
+	"\vsource_addr\x18\x06 \x01(\tR\n" +
+	"sourceAddr\"\x83\x01\n" +
 	"\x0fRestoreResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x17\n" +
 	"\anew_pid\x18\x02 \x01(\x05R\x06newPid\x12\x1c\n" +

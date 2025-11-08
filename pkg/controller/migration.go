@@ -9,6 +9,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -34,12 +35,30 @@ func (r *MigratableAppReconciler) performMigration(
 		logger.Error(err, "Failed to update status")
 	}
 
-	// Step 1: Create target pod
-	builder := NewPodBuilder(mapp)
+	// Step 1: Get AWS credentials for target pod
+	awsAccessKey, awsSecretKey, err := r.getAWSCredentials(ctx, mapp)
+	if err != nil {
+		logger.Error(err, "Failed to get AWS credentials")
+		return r.handleMigrationFailure(ctx, mapp, sourcePod, "CredentialsRetrievalFailed", err.Error())
+	}
+
+	// Step 2: Create target pod with credentials
+	var builder *PodBuilder
+	if awsAccessKey != "" && awsSecretKey != "" {
+		builder = NewPodBuilderWithCredentials(mapp, awsAccessKey, awsSecretKey)
+	} else {
+		builder = NewPodBuilder(mapp)
+	}
+
 	newGeneration := mapp.Status.Generation + 1
 	lastCheckpointID := mapp.Status.CheckpointStatus.LastCheckpointID
 
-	targetPod := builder.BuildRestorePod(newGeneration, lastCheckpointID, sourcePod.Spec.NodeName)
+	// Pre-calculate S3 prefix (will be updated after final dump)
+	// Note: This is a placeholder; actual dump ID will be determined during final dump
+	s3Prefix := fmt.Sprintf("checkpoints/%s/%d/%s/",
+		mapp.Name, mapp.Status.Generation, sourcePod.Spec.NodeName)
+
+	targetPod := builder.BuildRestorePod(newGeneration, lastCheckpointID, sourcePod.Spec.NodeName, s3Prefix)
 
 	logger.Info("Creating target pod", "pod", targetPod.Name)
 	if err := r.Create(ctx, targetPod); err != nil {
@@ -47,7 +66,7 @@ func (r *MigratableAppReconciler) performMigration(
 		return r.handleMigrationFailure(ctx, mapp, sourcePod, "TargetPodCreationFailed", err.Error())
 	}
 
-	// Step 2: Wait for target pod to be running
+	// Step 3: Wait for target pod to be running
 	logger.Info("Waiting for target pod to be running")
 	timeout := time.Duration(mapp.Spec.MigrationPolicy.MigrationTimeoutSeconds) * time.Second
 	if err := r.waitForPodRunning(ctx, targetPod, timeout); err != nil {
@@ -58,7 +77,7 @@ func (r *MigratableAppReconciler) performMigration(
 
 	logger.Info("Target pod is running", "pod", targetPod.Name, "ip", targetPod.Status.PodIP)
 
-	// Step 3: Connect to source agent
+	// Step 4: Connect to source agent
 	sourceAgent, err := NewAgentClient(sourcePod)
 	if err != nil {
 		logger.Error(err, "Failed to connect to source agent")
@@ -67,7 +86,7 @@ func (r *MigratableAppReconciler) performMigration(
 	}
 	defer sourceAgent.Close()
 
-	// Step 4: Start page-server on target
+	// Step 5: Connect to target agent (lazy-pages will start during restore)
 	targetAgent, err := NewAgentClient(targetPod)
 	if err != nil {
 		logger.Error(err, "Failed to connect to target agent")
@@ -76,17 +95,7 @@ func (r *MigratableAppReconciler) performMigration(
 	}
 	defer targetAgent.Close()
 
-	logger.Info("Starting page-server on target")
-	pageServerResp, err := targetAgent.StartPageServer(ctx, 9999, "/checkpoints")
-	if err != nil {
-		logger.Error(err, "Failed to start page-server")
-		r.Delete(ctx, targetPod) // Cleanup
-		return r.handleMigrationFailure(ctx, mapp, sourcePod, "PageServerStartFailed", err.Error())
-	}
-
-	logger.Info("Page-server started", "pid", pageServerResp.Pid, "port", pageServerResp.Port)
-
-	// Step 5: Perform final dump on source
+	// Step 6: Perform final dump on source (source acts as page-server)
 	logger.Info("Performing final dump on source")
 	dumpResp, err := sourceAgent.FinalDump(ctx, targetPod.Status.PodIP, 9999, lastCheckpointID)
 	if err != nil {
@@ -95,14 +104,37 @@ func (r *MigratableAppReconciler) performMigration(
 		return r.handleMigrationFailure(ctx, mapp, sourcePod, "FinalDumpFailed", err.Error())
 	}
 
-	logger.Info("Final dump completed", "dumpID", dumpResp.DumpId)
+	logger.Info("Final dump started (running as page-server)", "dumpID", dumpResp.DumpId)
 
-	// Step 6: Restore on target
+	// Step 7: Update target pod annotations with actual dump ID and S3 prefix
+	// S3 prefix format: checkpoints/{app-name}/{generation}/{node-name}/{checkpoint-id}
+	actualS3Prefix := fmt.Sprintf("checkpoints/%s/%d/%s/%s",
+		mapp.Name, mapp.Status.Generation, sourcePod.Spec.NodeName, dumpResp.DumpId)
+
+	// Refresh target pod to get latest resource version
+	if err := r.Get(ctx, client.ObjectKeyFromObject(targetPod), targetPod); err != nil {
+		logger.Error(err, "Failed to refresh target pod")
+		r.Delete(ctx, targetPod) // Cleanup
+		return r.handleMigrationFailure(ctx, mapp, sourcePod, "TargetPodUpdateFailed", err.Error())
+	}
+
+	targetPod.Annotations["migration.io/checkpoint-id"] = dumpResp.DumpId
+	targetPod.Annotations["migration.io/s3-prefix"] = actualS3Prefix
+	if err := r.Update(ctx, targetPod); err != nil {
+		logger.Error(err, "Failed to update target pod annotations")
+		r.Delete(ctx, targetPod) // Cleanup
+		return r.handleMigrationFailure(ctx, mapp, sourcePod, "TargetPodUpdateFailed", err.Error())
+	}
+
+	logger.Info("Updated target pod with checkpoint info", "dumpID", dumpResp.DumpId, "s3Prefix", actualS3Prefix)
+
+	// Step 8: Wait for metadata to be uploaded to S3 (asynchronous upload)
+	logger.Info("Waiting for metadata upload to S3")
+	time.Sleep(5 * time.Second) // Give time for metadata upload
+
+	// Step 9: Restore on target
 	logger.Info("Performing restore on target")
-	s3Prefix := fmt.Sprintf("checkpoints/%s/%s/%s",
-		sourcePod.Name, sourcePod.Spec.NodeName, dumpResp.DumpId)
-
-	restoreResp, err := targetAgent.Restore(ctx, dumpResp.DumpId, mapp.Spec.Storage.Bucket, s3Prefix)
+	restoreResp, err := targetAgent.Restore(ctx, dumpResp.DumpId, mapp.Spec.Storage.Bucket, actualS3Prefix, sourcePod.Status.PodIP)
 	if err != nil {
 		logger.Error(err, "Restore failed")
 		r.Delete(ctx, targetPod) // Cleanup
@@ -113,13 +145,13 @@ func (r *MigratableAppReconciler) performMigration(
 		"newPID", restoreResp.NewPid,
 		"duration", restoreResp.DurationMs)
 
-	// Step 7: Delete source pod
+	// Step 10: Delete source pod
 	logger.Info("Deleting source pod")
 	if err := r.Delete(ctx, sourcePod); err != nil {
 		logger.Error(err, "Failed to delete source pod (non-fatal)")
 	}
 
-	// Step 8: Update status
+	// Step 11: Update status
 	duration := time.Since(startTime)
 	migrationRecord := migrationv1alpha1.MigrationRecord{
 		FromNode:  sourcePod.Spec.NodeName,

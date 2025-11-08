@@ -79,6 +79,16 @@ rules:
   - create
   - patch
 
+# Secrets for AWS credentials
+- apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

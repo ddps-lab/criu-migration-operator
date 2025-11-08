@@ -89,6 +89,9 @@ message RestoreRequest {
 
   // Page-server port for lazy restore
   int32 page_server_port = 5;
+
+  // Source pod IP address (for lazy-pages to connect to)
+  string source_addr = 6;
 }
 
 // RestoreResponse contains the result of restore

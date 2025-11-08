@@ -17,15 +17,22 @@ import (
 
 // S3Client handles S3 operations for checkpoints
 type S3Client struct {
-	bucket   string
-	endpoint string
-	region   string
-	session  *session.Session
-	uploader *s3manager.Uploader
+	bucket           string
+	endpoint         string
+	downloadEndpoint string // Separate endpoint for downloads (e.g., CloudFront)
+	region           string
+	expressOneZone   bool
+	session          *session.Session
+	uploader         *s3manager.Uploader
 }
 
 // NewS3Client creates a new S3 client
 func NewS3Client(bucket, endpoint, region string) (*S3Client, error) {
+	return NewS3ClientWithOptions(bucket, endpoint, "", region, false)
+}
+
+// NewS3ClientWithOptions creates a new S3 client with advanced options
+func NewS3ClientWithOptions(bucket, endpoint, downloadEndpoint, region string, expressOneZone bool) (*S3Client, error) {
 	cfg := &aws.Config{
 		Region: aws.String(region),
 	}
@@ -41,11 +48,13 @@ func NewS3Client(bucket, endpoint, region string) (*S3Client, error) {
 	}
 
 	return &S3Client{
-		bucket:   bucket,
-		endpoint: endpoint,
-		region:   region,
-		session:  sess,
-		uploader: s3manager.NewUploader(sess),
+		bucket:           bucket,
+		endpoint:         endpoint,
+		downloadEndpoint: downloadEndpoint,
+		region:           region,
+		expressOneZone:   expressOneZone,
+		session:          sess,
+		uploader:         s3manager.NewUploader(sess),
 	}, nil
 }
 
@@ -58,7 +67,8 @@ func (c *S3Client) UploadCheckpoint(ctx context.Context, localDir, s3Prefix stri
 		if err != nil {
 			return err
 		}
-		if !info.IsDir() {
+		// Only upload regular files (skip directories, symlinks, etc.)
+		if info.Mode().IsRegular() {
 			files = append(files, path)
 		}
 		return nil
@@ -79,7 +89,8 @@ func (c *S3Client) UploadMetadataOnly(ctx context.Context, localDir, s3Prefix st
 		if err != nil {
 			return err
 		}
-		if !info.IsDir() {
+		// Only upload regular files (skip directories, symlinks, etc.)
+		if info.Mode().IsRegular() {
 			// Skip pages-*.img files (sent via page-server)
 			if !strings.HasPrefix(info.Name(), "pages-") {
 				files = append(files, path)
@@ -184,6 +195,58 @@ func (c *S3Client) DownloadCheckpoint(ctx context.Context, s3Prefix, localDir st
 
 	// Download files in parallel
 	return c.downloadFilesParallel(ctx, s3Prefix, localDir, objects)
+}
+
+// DownloadMetadataOnly downloads checkpoint metadata (excluding pages-*.img)
+// Downloads entire checkpoint chain from base path (not just single checkpoint)
+// Example: if s3Prefix is "checkpoints/my-app/0/node1/checkpoint-id/",
+// it downloads all checkpoints from "checkpoints/my-app/0/node1/"
+func (c *S3Client) DownloadMetadataOnly(ctx context.Context, s3Prefix, localDir string) error {
+	// Extract base path (remove checkpoint-id at the end)
+	// Example: "checkpoints/my-app/0/node1/checkpoint-id/" -> "checkpoints/my-app/0/node1/"
+	basePath := s3Prefix
+	if strings.HasSuffix(basePath, "/") {
+		basePath = strings.TrimSuffix(basePath, "/")
+	}
+	// Remove the last component (checkpoint ID)
+	parts := strings.Split(basePath, "/")
+	if len(parts) > 0 {
+		basePath = strings.Join(parts[:len(parts)-1], "/")
+	}
+	if basePath != "" && !strings.HasSuffix(basePath, "/") {
+		basePath += "/"
+	}
+
+	fmt.Printf("Downloading checkpoint chain metadata from base path: %s\n", basePath)
+
+	// List all objects under the base path (entire checkpoint chain)
+	svc := s3.New(c.session)
+	listInput := &s3.ListObjectsV2Input{
+		Bucket: aws.String(c.bucket),
+		Prefix: aws.String(basePath),
+	}
+
+	var metadataFiles []string
+	err := svc.ListObjectsV2PagesWithContext(ctx, listInput,
+		func(page *s3.ListObjectsV2Output, lastPage bool) bool {
+			for _, obj := range page.Contents {
+				// Filter: exclude pages-*.img files (these come from page-server)
+				filename := filepath.Base(*obj.Key)
+				if !strings.HasPrefix(filename, "pages-") {
+					metadataFiles = append(metadataFiles, *obj.Key)
+				}
+			}
+			return true
+		})
+	if err != nil {
+		return fmt.Errorf("failed to list objects: %w", err)
+	}
+
+	fmt.Printf("Found %d metadata files in checkpoint chain\n", len(metadataFiles))
+
+	// Download filtered files in parallel, preserving directory structure
+	// Use basePath instead of s3Prefix to preserve full checkpoint chain structure
+	return c.downloadFilesParallel(ctx, basePath, localDir, metadataFiles)
 }
 
 // downloadFilesParallel downloads multiple files in parallel
@@ -374,4 +437,38 @@ func (c *S3Client) ReadMetadataFile(ctx context.Context, s3Key string) ([]byte, 
 	defer result.Body.Close()
 
 	return io.ReadAll(result.Body)
+}
+
+// getEndpoint returns the S3 endpoint URL for CRIU object storage (uploads)
+func (c *S3Client) getEndpoint() string {
+	if c.endpoint != "" {
+		return c.endpoint
+	}
+	// Default AWS S3 endpoint format
+	return fmt.Sprintf("s3.%s.amazonaws.com", c.region)
+}
+
+// getDownloadEndpoint returns the endpoint for downloads (may be CloudFront)
+func (c *S3Client) getDownloadEndpoint() string {
+	if c.downloadEndpoint != "" {
+		return c.downloadEndpoint
+	}
+	// Fall back to upload endpoint
+	return c.getEndpoint()
+}
+
+// isExpressOneZone returns whether S3 Express One Zone is enabled
+func (c *S3Client) isExpressOneZone() bool {
+	return c.expressOneZone
+}
+
+// needsBucketOption returns whether CRIU needs --object-storage-bucket option
+// CloudFront (CDN) doesn't use bucket concept, so we skip it
+func (c *S3Client) needsBucketOption() bool {
+	// If download endpoint is set and different from upload endpoint,
+	// it's likely a CDN (CloudFront) which doesn't need bucket option
+	if c.downloadEndpoint != "" && c.downloadEndpoint != c.endpoint {
+		return false
+	}
+	return true
 }
