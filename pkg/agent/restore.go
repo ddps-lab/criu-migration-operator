@@ -48,12 +48,12 @@ func (m *RestoreManager) Restore(ctx context.Context, dumpID, s3Prefix string, u
 	// Note: We cannot read from /proc/PID/mountinfo here because the app container
 	// doesn't exist yet at restore time. The agent container has different mounts.
 	externalMounts := map[string]string{
-		"/etc/hosts":                                  "etc-hosts",
-		"/etc/hostname":                               "etc-hostname",
-		"/etc/resolv.conf":                            "etc-resolv.conf",
-		"/dev/termination-log":                        "dev-termination-log",
-		"/dev/shm":                                    "dev-shm",
-		"/run/secrets/kubernetes.io/serviceaccount":   "run-secrets-kubernetes.io-serviceaccount",
+		"/etc/hosts":           "etc-hosts",
+		"/etc/hostname":        "etc-hostname",
+		"/etc/resolv.conf":     "etc-resolv.conf",
+		"/dev/termination-log": "dev-termination-log",
+		"/dev/shm":             "dev-shm",
+		"/run/secrets/kubernetes.io/serviceaccount": "run-secrets-kubernetes.io-serviceaccount",
 	}
 	fmt.Printf("Using %d external mounts for restore\n", len(externalMounts))
 
