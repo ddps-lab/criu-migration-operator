@@ -676,6 +676,19 @@ Apache License 2.0
 
 ## Recent Updates
 
+### 2025-11-12: Re-Migration Support and Production Hardening
+- **Fixed**: Multiple critical issues preventing re-migration (gen0 → gen1 → gen2)
+- **Major Changes**:
+  - S3 path consistency: Use MigratableApp name instead of pod name across all generations
+  - SOURCE_POD_IP injection: Proper lazy-pages connection for re-migration
+  - Generation number tracking: Fixed via Downward API annotation reading
+  - PID layout consistency: Added PID booster init container for reproducible PIDs
+  - Enhanced namespace handling: Comprehensive external mount detection and mapping
+  - Robust lazy-pages lifecycle: Proper readiness detection and health checks
+- **Results**: Successful multi-generation migration with 43-file checkpoint chains
+- **Performance**: ~7s restore time with lazy-pages, continuous pre-checkpoints working
+- **Commit**: [c07b93f](../../commit/c07b93f)
+
 ### 2025-11-11: Page-Server Lifecycle Fix
 - **Fixed**: TCP health check killing page-server prematurely
 - **Solution**: Removed TCP dial from `waitForPageServerReady()` function
