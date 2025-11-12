@@ -21,7 +21,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o agent cmd/agent/main.go
 # Runtime stage
 FROM ubuntu:24.04
 
-# Install CRIU runtime dependencies
+# Install CRIU runtime dependencies and kubectl
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libprotobuf-c1 \
@@ -35,6 +35,11 @@ RUN apt-get update && apt-get install -y \
     libdrm2 \
     libcurl4 \
     libssl3 \
+    util-linux \
+    curl \
+    && curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
+    && chmod +x kubectl \
+    && mv kubectl /usr/local/bin/kubectl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -47,7 +52,7 @@ COPY criu/criu /usr/local/bin/criu
 RUN chmod +x /usr/local/bin/criu
 
 # Create working directory for checkpoints
-RUN mkdir -p /checkpoints && chmod 755 /checkpoints
+RUN mkdir -p /tmp/.criu-checkpoints && chmod 755 /tmp/.criu-checkpoints
 
 # Run as root (required for CRIU)
 USER root

@@ -60,14 +60,15 @@ func (c *AgentClient) FinalDump(ctx context.Context, pageServerAddr string, page
 }
 
 // Restore calls the agent's Restore RPC
-func (c *AgentClient) Restore(ctx context.Context, dumpID, s3Bucket, s3Prefix, sourceAddr string) (*pb.RestoreResponse, error) {
+func (c *AgentClient) Restore(ctx context.Context, dumpID, s3Bucket, s3Prefix, sourceAddr string, externalMounts map[string]string) (*pb.RestoreResponse, error) {
 	return c.client.Restore(ctx, &pb.RestoreRequest{
 		DumpId:         dumpID,
 		S3Bucket:       s3Bucket,
 		S3Prefix:       s3Prefix,
 		UseLazyPages:   true,
 		PageServerPort: 9999,
-		SourceAddr:     sourceAddr, // Source pod IP for lazy-pages connection
+		SourceAddr:     sourceAddr,     // Source pod IP for lazy-pages connection
+		ExternalMounts: externalMounts, // External mounts from dump
 	})
 }
 
@@ -82,5 +83,12 @@ func (c *AgentClient) StartPageServer(ctx context.Context, port int32, checkpoin
 		Port:          port,
 		CheckpointDir: checkpointDir,
 		Daemon:        true,
+	})
+}
+
+// CheckPageServerStatus calls the agent's CheckPageServerStatus RPC
+func (c *AgentClient) CheckPageServerStatus(ctx context.Context, pid int32) (*pb.PageServerStatusResponse, error) {
+	return c.client.CheckPageServerStatus(ctx, &pb.PageServerStatusRequest{
+		Pid: pid,
 	})
 }

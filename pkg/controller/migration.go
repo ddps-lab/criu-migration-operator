@@ -58,7 +58,7 @@ func (r *MigratableAppReconciler) performMigration(
 	s3Prefix := fmt.Sprintf("checkpoints/%s/%d/%s/",
 		mapp.Name, mapp.Status.Generation, sourcePod.Spec.NodeName)
 
-	targetPod := builder.BuildRestorePod(newGeneration, lastCheckpointID, sourcePod.Spec.NodeName, s3Prefix)
+	targetPod := builder.BuildRestorePod(newGeneration, lastCheckpointID, sourcePod.Spec.NodeName, s3Prefix, sourcePod.Status.PodIP)
 
 	logger.Info("Creating target pod", "pod", targetPod.Name)
 	if err := r.Create(ctx, targetPod); err != nil {
@@ -106,6 +106,10 @@ func (r *MigratableAppReconciler) performMigration(
 
 	logger.Info("Final dump started (running as page-server)", "dumpID", dumpResp.DumpId)
 
+	// Extract external mounts from dump response
+	externalMounts := dumpResp.ExternalMounts
+	logger.Info("Received external mounts from source", "count", len(externalMounts), "mounts", externalMounts)
+
 	// Step 7: Update target pod annotations with actual dump ID and S3 prefix
 	// S3 prefix format: checkpoints/{app-name}/{generation}/{node-name}/{checkpoint-id}
 	actualS3Prefix := fmt.Sprintf("checkpoints/%s/%d/%s/%s",
@@ -132,9 +136,16 @@ func (r *MigratableAppReconciler) performMigration(
 	logger.Info("Waiting for metadata upload to S3")
 	time.Sleep(5 * time.Second) // Give time for metadata upload
 
+	// Step 8.5: Wait for page-server to be ready (accepting connections)
+	if err := r.waitForPageServerReady(ctx, sourcePod.Status.PodIP, 9999, 30*time.Second); err != nil {
+		logger.Error(err, "Page-server not ready")
+		r.Delete(ctx, targetPod) // Cleanup
+		return r.handleMigrationFailure(ctx, mapp, sourcePod, "PageServerNotReady", err.Error())
+	}
+
 	// Step 9: Restore on target
 	logger.Info("Performing restore on target")
-	restoreResp, err := targetAgent.Restore(ctx, dumpResp.DumpId, mapp.Spec.Storage.Bucket, actualS3Prefix, sourcePod.Status.PodIP)
+	restoreResp, err := targetAgent.Restore(ctx, dumpResp.DumpId, mapp.Spec.Storage.Bucket, actualS3Prefix, sourcePod.Status.PodIP, externalMounts)
 	if err != nil {
 		logger.Error(err, "Restore failed")
 		r.Delete(ctx, targetPod) // Cleanup
@@ -145,13 +156,35 @@ func (r *MigratableAppReconciler) performMigration(
 		"newPID", restoreResp.NewPid,
 		"duration", restoreResp.DurationMs)
 
-	// Step 10: Delete source pod
-	logger.Info("Deleting source pod")
+	// Step 9.5: Wait for lazy-pages to connect to page-server
+	// IMPORTANT: Restore RPC returns after starting restore process, but lazy-pages
+	// only connects to page-server AFTER restore process starts and requests pages.
+	// This typically takes 1-2 seconds. We must wait for the connection to establish
+	// before checking page-server completion, otherwise we'll see page-server as "terminated"
+	// when it's actually still waiting for the connection!
+	logger.Info("Waiting for lazy-pages to connect to page-server", "delay", "5s")
+	time.Sleep(5 * time.Second)
+
+	// Step 10: Wait for page-server to complete (all pages transferred)
+	// The source pod's page-server must remain alive until it transfers all pages
+	// to the target's lazy-pages daemon. The page-server automatically terminates
+	// when all pages have been sent.
+	// This implements post-copy live migration strategy.
+	logger.Info("Waiting for page-server to complete page transfer", "pageServerPID", dumpResp.PageServerPid)
+	if err := r.waitForPageServerCompletion(ctx, sourceAgent, dumpResp.PageServerPid, 5*time.Minute); err != nil {
+		logger.Error(err, "Page-server did not complete in time (proceeding anyway)")
+		// Non-fatal - continue with source pod deletion
+	} else {
+		logger.Info("Page-server completed successfully")
+	}
+
+	// Step 11: Delete source pod
+	logger.Info("Deleting source pod after page-server completion")
 	if err := r.Delete(ctx, sourcePod); err != nil {
 		logger.Error(err, "Failed to delete source pod (non-fatal)")
 	}
 
-	// Step 11: Update status
+	// Step 12: Update status
 	duration := time.Since(startTime)
 	migrationRecord := migrationv1alpha1.MigrationRecord{
 		FromNode:  sourcePod.Spec.NodeName,
@@ -225,4 +258,64 @@ func (r *MigratableAppReconciler) handleMigrationFailure(
 
 	// Requeue after some time to retry
 	return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+}
+
+// waitForPageServerCompletion waits for the page-server process to terminate
+func (r *MigratableAppReconciler) waitForPageServerCompletion(
+	ctx context.Context,
+	sourceAgent *AgentClient,
+	pageServerPID int32,
+	timeout time.Duration,
+) error {
+	logger := log.FromContext(ctx)
+	deadline := time.Now().Add(timeout)
+	pollInterval := 2 * time.Second
+
+	for time.Now().Before(deadline) {
+		// Check page-server status
+		status, err := sourceAgent.CheckPageServerStatus(ctx, pageServerPID)
+		if err != nil {
+			logger.Error(err, "Failed to check page-server status", "pid", pageServerPID)
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		if !status.IsAlive {
+			logger.Info("Page-server has terminated",
+				"pid", pageServerPID,
+				"message", status.StatusMessage)
+			return nil
+		}
+
+		logger.V(1).Info("Page-server still running",
+			"pid", pageServerPID,
+			"message", status.StatusMessage)
+
+		time.Sleep(pollInterval)
+	}
+
+	return fmt.Errorf("page-server did not complete within %v", timeout)
+}
+
+// waitForPageServerReady waits for the page-server to be ready to accept connections
+func (r *MigratableAppReconciler) waitForPageServerReady(
+	ctx context.Context,
+	sourceIP string,
+	port int,
+	timeout time.Duration,
+) error {
+	logger := log.FromContext(ctx)
+	// DISABLED: TCP connection check kills the page-server!
+	// CRIU page-server expects the first connection to be from lazy-pages daemon,
+	// not a health check that immediately closes the connection.
+	// Instead, we trust that FinalDump completed successfully and just add a small delay
+	// to ensure page-server has fully started.
+
+	logger.Info("Waiting for page-server to be ready", "address", fmt.Sprintf("%s:%d", sourceIP, port), "timeout", timeout)
+
+	// Give page-server a moment to fully start up
+	time.Sleep(1 * time.Second)
+
+	logger.Info("Assuming page-server is ready (no health check to avoid killing it)", "address", fmt.Sprintf("%s:%d", sourceIP, port))
+	return nil
 }

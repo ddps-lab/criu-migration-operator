@@ -18,6 +18,7 @@ type CheckpointManager struct {
 	workDir  string
 	s3Client *S3Client
 	podName  string
+	appName  string // MigratableApp name (from migration.io/app label)
 	nodeName string
 
 	// Current checkpoint state
@@ -37,10 +38,26 @@ func NewCheckpointManager(workDir string, s3Client *S3Client, podName, nodeName 
 		}
 	}
 
+	// Read MigratableApp name from pod annotations via Downward API
+	// This should match the MigratableApp resource name for consistent S3 paths
+	appName := podName // Default to pod name if label not found
+	annotationsData, err := os.ReadFile("/etc/podinfo/annotations")
+	if err == nil {
+		// Parse annotations file (key="value" format, one per line)
+		lines := strings.Split(string(annotationsData), "\n")
+		for _, line := range lines {
+			if strings.HasPrefix(line, "migration.io/app=") {
+				appName = strings.Trim(strings.TrimPrefix(line, "migration.io/app="), "\"")
+				break
+			}
+		}
+	}
+
 	return &CheckpointManager{
 		workDir:    workDir,
 		s3Client:   s3Client,
 		podName:    podName,
+		appName:    appName,
 		nodeName:   nodeName,
 		generation: generation,
 	}
@@ -61,6 +78,7 @@ func (m *CheckpointManager) PreCheckpoint(ctx context.Context, pid int, parentDu
 		"pre-dump",
 		"-t", strconv.Itoa(pid),
 		"-D", dumpDir,
+		"--root", fmt.Sprintf("/proc/%d/root", pid), // Use main container's filesystem root
 		"--track-mem",
 		"--leave-running",
 		"-v4",
@@ -75,7 +93,13 @@ func (m *CheckpointManager) PreCheckpoint(ctx context.Context, pid int, parentDu
 		}
 	}
 
-	// Execute CRIU
+	// Execute CRIU dump directly from agent container
+	// We DON'T need nsenter for dump because:
+	// 1. Shared PID namespace lets us see main container's processes
+	// 2. SYS_PTRACE capability allows dumping processes
+	// 3. Dump only reads process state, doesn't need main container's mount/network namespaces
+	fmt.Printf("Executing pre-dump: criu %s\n", strings.Join(args, " "))
+
 	cmd := exec.CommandContext(ctx, "criu", args...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -124,13 +148,14 @@ func (m *CheckpointManager) PreCheckpoint(ctx context.Context, pid int, parentDu
 
 // FinalDump performs the final dump with page-server
 // This returns immediately after starting the dump; CRIU runs in background as page-server
-func (m *CheckpointManager) FinalDump(ctx context.Context, pid int, pageServerAddr string, pageServerPort int, parentDumpID string) (*CheckpointResult, error) {
+// The cmd parameter should be stored by the caller to keep the process alive
+func (m *CheckpointManager) FinalDump(ctx context.Context, pid int, pageServerAddr string, pageServerPort int, parentDumpID string) (*CheckpointResult, *exec.Cmd, error) {
 	dumpID := m.generateDumpID()
 	dumpDir := filepath.Join(m.workDir, dumpID)
 
 	// Create dump directory
 	if err := os.MkdirAll(dumpDir, 0755); err != nil {
-		return nil, fmt.Errorf("failed to create dump directory: %w", err)
+		return nil, nil, fmt.Errorf("failed to create dump directory: %w", err)
 	}
 
 	// Get external mounts dynamically from /proc/PID/mountinfo
@@ -140,11 +165,25 @@ func (m *CheckpointManager) FinalDump(ctx context.Context, pid int, pageServerAd
 		externalMounts = make(map[string]string) // Continue with empty map
 	}
 
+	// Get PID namespace inode for external namespace marking
+	pidNsPath := fmt.Sprintf("/proc/%d/ns/pid", pid)
+	pidNsLink, err := os.Readlink(pidNsPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read PID namespace: %w", err)
+	}
+	// Extract inode from format "pid:[4026532508]"
+	// Use strings.TrimPrefix and TrimSuffix for simple parsing
+	pidNsInode := strings.TrimPrefix(pidNsLink, "pid:[")
+	pidNsInode = strings.TrimSuffix(pidNsInode, "]")
+	fmt.Printf("Detected PID namespace inode: %s (from %s)\n", pidNsInode, pidNsLink)
+
 	// Build CRIU command with lazy-pages (this pod acts as page server)
+	// Simplified: removed --manage-cgroups and --mntns-compat-mode
 	args := []string{
 		"dump",
 		"-t", strconv.Itoa(pid),
 		"-D", dumpDir,
+		"--root", fmt.Sprintf("/proc/%d/root", pid), // Use main container's filesystem root
 		"--lazy-pages",
 		"--address", "0.0.0.0", // Listen on all interfaces
 		"--port", strconv.Itoa(pageServerPort),
@@ -152,15 +191,22 @@ func (m *CheckpointManager) FinalDump(ctx context.Context, pid int, pageServerAd
 		"--shell-job",
 		"-v4",
 		"--log-file", filepath.Join(dumpDir, "criu.log"),
-		"--manage-cgroups=ignore", // Use 'ignore' mode: don't deal with cgroups and pretend they don't exist
 		"--evasive-devices",
 	}
 
-	// Add external mount options dynamically
-	// Format: --external mnt[/mountpoint]:identifier
-	for mountPoint, identifier := range externalMounts {
-		args = append(args, "--external", fmt.Sprintf("mnt[%s]:%s", mountPoint, identifier))
-	}
+	// Mark PID namespace as external (will be injected via inherit-fd during restore)
+	args = append(args, "--external", fmt.Sprintf("pid[%s]:main_pidns", pidNsInode))
+
+	// Mark Kubernetes-injected file mounts as external (these exist in target pod too)
+	// Note: We DON'T mark /dev as external - let CRIU handle it normally during dump,
+	// and skip it during restore via --join-ns mnt (which skips all mount restoration)
+	args = append(args, "--external", "mnt[/dev/termination-log]:dev-termination-log")
+	args = append(args, "--external", "mnt[/etc/hosts]:etc-hosts")
+	args = append(args, "--external", "mnt[/etc/hostname]:etc-hostname")
+	args = append(args, "--external", "mnt[/etc/resolv.conf]:etc-resolv-conf")
+
+	// Auto-detect other external mounts (shared/slave mounts like /dev/shm, serviceaccount token)
+	args = append(args, "--external", "mnt[]:ms")
 
 	// Add parent reference for incremental dump
 	if parentDumpID != "" {
@@ -172,11 +218,31 @@ func (m *CheckpointManager) FinalDump(ctx context.Context, pid int, pageServerAd
 
 	fmt.Printf("CRIU dump args: %v\n", args)
 
+	// Execute CRIU dump directly from agent container
+	// We DON'T need nsenter for dump - only for restore
+	fmt.Printf("======================================\n")
+	fmt.Printf("EXECUTING FINAL DUMP COMMAND:\n")
+	fmt.Printf("criu %s\n", strings.Join(args, " "))
+	fmt.Printf("======================================\n")
+
 	// Start CRIU dump in background (it will act as page-server)
-	cmd := exec.CommandContext(ctx, "criu", args...)
+	// IMPORTANT: DO NOT use exec.CommandContext here!
+	// We need the process to survive independently of any context lifecycle
+	// The process should only terminate when lazy-pages completes page transfer
+	cmd := exec.Command("criu", args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("failed to start criu dump: %w", err)
+		return nil, nil, fmt.Errorf("failed to start criu dump: %w", err)
 	}
+
+	// Store page-server PID for tracking
+	pageServerPID := cmd.Process.Pid
+	fmt.Printf("[%s] [SOURCE-AGENT] Started CRIU dump (page-server) with PID: %d\n",
+		time.Now().Format("15:04:05.000"), pageServerPID)
+	fmt.Printf("[%s] [SOURCE-AGENT] Page-server is now running and waiting for lazy-pages connection\n",
+		time.Now().Format("15:04:05.000"))
 
 	// Wait for checkpoint metadata files to be created (not for process to complete)
 	// This indicates CRIU has started and created the checkpoint structure
@@ -188,7 +254,37 @@ func (m *CheckpointManager) FinalDump(ctx context.Context, pid int, pageServerAd
 
 		// Read CRIU log for debugging
 		criuLog := m.readLogFile(filepath.Join(dumpDir, "criu.log"), 100)
-		return nil, fmt.Errorf("failed to wait for checkpoint files: %w\n\nCRIU Log:\n%s", err, criuLog)
+		return nil, nil, fmt.Errorf("failed to wait for checkpoint files: %w\n\nCRIU Log:\n%s", err, criuLog)
+	}
+
+	fmt.Printf("[%s] [SOURCE-AGENT] Checkpoint metadata files created successfully\n",
+		time.Now().Format("15:04:05.000"))
+
+	// Print CRIU log output
+	criuLogPath := filepath.Join(dumpDir, "criu.log")
+	if logContent, err := os.ReadFile(criuLogPath); err == nil {
+		fmt.Printf("======================================\n")
+		fmt.Printf("CRIU DUMP LOG OUTPUT (last 50 lines):\n")
+		fmt.Printf("======================================\n")
+		lines := strings.Split(string(logContent), "\n")
+		startIdx := len(lines) - 50
+		if startIdx < 0 {
+			startIdx = 0
+		}
+		for _, line := range lines[startIdx:] {
+			if line != "" {
+				fmt.Println(line)
+			}
+		}
+		fmt.Printf("======================================\n")
+	}
+
+	// Check if process is still running
+	procPath := fmt.Sprintf("/proc/%d", pageServerPID)
+	if _, err := os.Stat(procPath); os.IsNotExist(err) {
+		fmt.Printf("[DEBUG] WARNING: Page-server process %d has ALREADY TERMINATED after metadata creation!\n", pageServerPID)
+	} else {
+		fmt.Printf("[DEBUG] Page-server process %d is still RUNNING (good!)\n", pageServerPID)
 	}
 
 	// Get metadata size (pages sent via page-server)
@@ -198,23 +294,31 @@ func (m *CheckpointManager) FinalDump(ctx context.Context, pid int, pageServerAd
 	}
 
 	result := &CheckpointResult{
-		DumpID:    dumpID,
-		Timestamp: time.Now(),
-		SizeBytes: size,
+		DumpID:          dumpID,
+		Timestamp:       time.Now(),
+		SizeBytes:       size,
+		ExternalMounts:  externalMounts, // Pass external mounts to controller
+		PageServerPID:   pageServerPID,   // Return page-server PID for tracking
+		PageServerAlive: true,            // Indicate that page-server is running
 	}
 
-	// Upload metadata only to S3 asynchronously (keep all checkpoints in chain)
+	// Upload ALL files (including pages-*.img) to S3 asynchronously
+	// Even though pages are sent via page-server during migration, they must be uploaded
+	// to S3 for restore to work (CRIU will fetch them from S3 when lazy-pages daemon needs them)
 	go func() {
 		uploadCtx := context.Background()
 		s3Prefix := m.getS3Prefix(dumpID)
-		if err := m.s3Client.UploadMetadataOnly(uploadCtx, dumpDir, s3Prefix); err != nil {
-			fmt.Printf("Failed to upload metadata to S3: %v\n", err)
+		if err := m.s3Client.UploadCheckpoint(uploadCtx, dumpDir, s3Prefix); err != nil {
+			fmt.Printf("Failed to upload checkpoint to S3: %v\n", err)
 			return
 		}
-		fmt.Printf("Successfully uploaded metadata to S3: %s\n", s3Prefix)
+		fmt.Printf("Successfully uploaded checkpoint to S3: %s\n", s3Prefix)
 	}()
 
-	return result, nil
+	fmt.Printf("[DEBUG] FinalDump returning result with page-server PID %d and cmd object\n", pageServerPID)
+
+	// Return both result and cmd - caller MUST store cmd to keep process alive
+	return result, cmd, nil
 }
 
 // waitForCheckpointFiles waits for essential checkpoint files to be created
@@ -348,7 +452,9 @@ func (m *CheckpointManager) generateDumpID() string {
 // getS3Prefix returns the S3 prefix for a checkpoint
 // Format: checkpoints/{app-name}/{generation}/{node-name}/{checkpoint-id}
 func (m *CheckpointManager) getS3Prefix(dumpID string) string {
-	return fmt.Sprintf("checkpoints/%s/%d/%s/%s", m.podName, m.generation, m.nodeName, dumpID)
+	// Use appName (MigratableApp name) instead of podName for consistent S3 paths
+	// This ensures gen0, gen1, gen2... all use the same base path: checkpoints/my-web-app/...
+	return fmt.Sprintf("checkpoints/%s/%d/%s/%s", m.appName, m.generation, m.nodeName, dumpID)
 }
 
 // getDirectorySize calculates the total size of a directory
@@ -439,8 +545,11 @@ func (m *CheckpointManager) readLogFile(path string, maxLines int) string {
 
 // CheckpointResult contains the result of a checkpoint operation
 type CheckpointResult struct {
-	DumpID      string
-	Timestamp   time.Time
-	SizeBytes   int64
-	PagesDumped int64
+	DumpID          string
+	Timestamp       time.Time
+	SizeBytes       int64
+	PagesDumped     int64
+	ExternalMounts  map[string]string // mountpoint -> identifier
+	PageServerPID   int                // PID of page-server process (for final dump)
+	PageServerAlive bool               // Whether page-server is still running
 }

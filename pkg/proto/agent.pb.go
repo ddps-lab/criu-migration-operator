@@ -231,8 +231,12 @@ type FinalDumpResponse struct {
 	Timestamp int64 `protobuf:"varint,2,opt,name=timestamp,proto3" json:"timestamp,omitempty"`
 	// Size of metadata in bytes (pages sent via page-server)
 	MetadataSizeBytes int64 `protobuf:"varint,3,opt,name=metadata_size_bytes,json=metadataSizeBytes,proto3" json:"metadata_size_bytes,omitempty"`
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// External mounts detected during dump (mountpoint -> identifier)
+	ExternalMounts map[string]string `protobuf:"bytes,4,rep,name=external_mounts,json=externalMounts,proto3" json:"external_mounts,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// PID of page-server process (for tracking completion)
+	PageServerPid int32 `protobuf:"varint,5,opt,name=page_server_pid,json=pageServerPid,proto3" json:"page_server_pid,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *FinalDumpResponse) Reset() {
@@ -286,6 +290,20 @@ func (x *FinalDumpResponse) GetMetadataSizeBytes() int64 {
 	return 0
 }
 
+func (x *FinalDumpResponse) GetExternalMounts() map[string]string {
+	if x != nil {
+		return x.ExternalMounts
+	}
+	return nil
+}
+
+func (x *FinalDumpResponse) GetPageServerPid() int32 {
+	if x != nil {
+		return x.PageServerPid
+	}
+	return 0
+}
+
 // RestoreRequest contains parameters for restore
 type RestoreRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -300,9 +318,11 @@ type RestoreRequest struct {
 	// Page-server port for lazy restore
 	PageServerPort int32 `protobuf:"varint,5,opt,name=page_server_port,json=pageServerPort,proto3" json:"page_server_port,omitempty"`
 	// Source pod IP address (for lazy-pages to connect to)
-	SourceAddr    string `protobuf:"bytes,6,opt,name=source_addr,json=sourceAddr,proto3" json:"source_addr,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	SourceAddr string `protobuf:"bytes,6,opt,name=source_addr,json=sourceAddr,proto3" json:"source_addr,omitempty"`
+	// External mounts to use during restore (mountpoint -> identifier)
+	ExternalMounts map[string]string `protobuf:"bytes,7,rep,name=external_mounts,json=externalMounts,proto3" json:"external_mounts,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *RestoreRequest) Reset() {
@@ -375,6 +395,13 @@ func (x *RestoreRequest) GetSourceAddr() string {
 		return x.SourceAddr
 	}
 	return ""
+}
+
+func (x *RestoreRequest) GetExternalMounts() map[string]string {
+	if x != nil {
+		return x.ExternalMounts
+	}
+	return nil
 }
 
 // RestoreResponse contains the result of restore
@@ -715,6 +742,116 @@ func (x *PageServerResponse) GetPort() int32 {
 	return 0
 }
 
+// PageServerStatusRequest contains parameters for checking page-server status
+type PageServerStatusRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// PID of page-server to check
+	Pid           int32 `protobuf:"varint,1,opt,name=pid,proto3" json:"pid,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PageServerStatusRequest) Reset() {
+	*x = PageServerStatusRequest{}
+	mi := &file_pkg_proto_agent_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PageServerStatusRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PageServerStatusRequest) ProtoMessage() {}
+
+func (x *PageServerStatusRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_proto_agent_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PageServerStatusRequest.ProtoReflect.Descriptor instead.
+func (*PageServerStatusRequest) Descriptor() ([]byte, []int) {
+	return file_pkg_proto_agent_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *PageServerStatusRequest) GetPid() int32 {
+	if x != nil {
+		return x.Pid
+	}
+	return 0
+}
+
+// PageServerStatusResponse contains the page-server status
+type PageServerStatusResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Whether process is still running
+	IsAlive bool `protobuf:"varint,1,opt,name=is_alive,json=isAlive,proto3" json:"is_alive,omitempty"`
+	// Exit code if terminated (0 if still running)
+	ExitCode int32 `protobuf:"varint,2,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
+	// Human-readable status message
+	StatusMessage string `protobuf:"bytes,3,opt,name=status_message,json=statusMessage,proto3" json:"status_message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PageServerStatusResponse) Reset() {
+	*x = PageServerStatusResponse{}
+	mi := &file_pkg_proto_agent_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PageServerStatusResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PageServerStatusResponse) ProtoMessage() {}
+
+func (x *PageServerStatusResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_proto_agent_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PageServerStatusResponse.ProtoReflect.Descriptor instead.
+func (*PageServerStatusResponse) Descriptor() ([]byte, []int) {
+	return file_pkg_proto_agent_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *PageServerStatusResponse) GetIsAlive() bool {
+	if x != nil {
+		return x.IsAlive
+	}
+	return false
+}
+
+func (x *PageServerStatusResponse) GetExitCode() int32 {
+	if x != nil {
+		return x.ExitCode
+	}
+	return 0
+}
+
+func (x *PageServerStatusResponse) GetStatusMessage() string {
+	if x != nil {
+		return x.StatusMessage
+	}
+	return ""
+}
+
 var File_pkg_proto_agent_proto protoreflect.FileDescriptor
 
 const file_pkg_proto_agent_proto_rawDesc = "" +
@@ -734,11 +871,16 @@ const file_pkg_proto_agent_proto_rawDesc = "" +
 	"\x10page_server_addr\x18\x01 \x01(\tR\x0epageServerAddr\x12(\n" +
 	"\x10page_server_port\x18\x02 \x01(\x05R\x0epageServerPort\x12$\n" +
 	"\x0eparent_dump_id\x18\x03 \x01(\tR\fparentDumpId\x12#\n" +
-	"\rleave_running\x18\x04 \x01(\bR\fleaveRunning\"z\n" +
+	"\rleave_running\x18\x04 \x01(\bR\fleaveRunning\"\xbc\x02\n" +
 	"\x11FinalDumpResponse\x12\x17\n" +
 	"\adump_id\x18\x01 \x01(\tR\x06dumpId\x12\x1c\n" +
 	"\ttimestamp\x18\x02 \x01(\x03R\ttimestamp\x12.\n" +
-	"\x13metadata_size_bytes\x18\x03 \x01(\x03R\x11metadataSizeBytes\"\xd4\x01\n" +
+	"\x13metadata_size_bytes\x18\x03 \x01(\x03R\x11metadataSizeBytes\x12U\n" +
+	"\x0fexternal_mounts\x18\x04 \x03(\v2,.agent.FinalDumpResponse.ExternalMountsEntryR\x0eexternalMounts\x12&\n" +
+	"\x0fpage_server_pid\x18\x05 \x01(\x05R\rpageServerPid\x1aA\n" +
+	"\x13ExternalMountsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xeb\x02\n" +
 	"\x0eRestoreRequest\x12\x17\n" +
 	"\adump_id\x18\x01 \x01(\tR\x06dumpId\x12\x1b\n" +
 	"\ts3_bucket\x18\x02 \x01(\tR\bs3Bucket\x12\x1b\n" +
@@ -746,7 +888,11 @@ const file_pkg_proto_agent_proto_rawDesc = "" +
 	"\x0euse_lazy_pages\x18\x04 \x01(\bR\fuseLazyPages\x12(\n" +
 	"\x10page_server_port\x18\x05 \x01(\x05R\x0epageServerPort\x12\x1f\n" +
 	"\vsource_addr\x18\x06 \x01(\tR\n" +
-	"sourceAddr\"\x83\x01\n" +
+	"sourceAddr\x12R\n" +
+	"\x0fexternal_mounts\x18\a \x03(\v2).agent.RestoreRequest.ExternalMountsEntryR\x0eexternalMounts\x1aA\n" +
+	"\x13ExternalMountsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x83\x01\n" +
 	"\x0fRestoreResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x17\n" +
 	"\anew_pid\x18\x02 \x01(\x05R\x06newPid\x12\x1c\n" +
@@ -769,13 +915,20 @@ const file_pkg_proto_agent_proto_rawDesc = "" +
 	"\x12PageServerResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x10\n" +
 	"\x03pid\x18\x02 \x01(\x05R\x03pid\x12\x12\n" +
-	"\x04port\x18\x03 \x01(\x05R\x04port2\xd3\x02\n" +
+	"\x04port\x18\x03 \x01(\x05R\x04port\"+\n" +
+	"\x17PageServerStatusRequest\x12\x10\n" +
+	"\x03pid\x18\x01 \x01(\x05R\x03pid\"y\n" +
+	"\x18PageServerStatusResponse\x12\x19\n" +
+	"\bis_alive\x18\x01 \x01(\bR\aisAlive\x12\x1b\n" +
+	"\texit_code\x18\x02 \x01(\x05R\bexitCode\x12%\n" +
+	"\x0estatus_message\x18\x03 \x01(\tR\rstatusMessage2\xad\x03\n" +
 	"\tCRIUAgent\x12J\n" +
 	"\rPreCheckpoint\x12\x1b.agent.PreCheckpointRequest\x1a\x1c.agent.PreCheckpointResponse\x12>\n" +
 	"\tFinalDump\x12\x17.agent.FinalDumpRequest\x1a\x18.agent.FinalDumpResponse\x128\n" +
 	"\aRestore\x12\x15.agent.RestoreRequest\x1a\x16.agent.RestoreResponse\x128\n" +
 	"\tGetStatus\x12\x14.agent.StatusRequest\x1a\x15.agent.StatusResponse\x12F\n" +
-	"\x0fStartPageServer\x12\x18.agent.PageServerRequest\x1a\x19.agent.PageServerResponseB7Z5github.com/ddps-lab/criu-migration-operator/pkg/protob\x06proto3"
+	"\x0fStartPageServer\x12\x18.agent.PageServerRequest\x1a\x19.agent.PageServerResponse\x12X\n" +
+	"\x15CheckPageServerStatus\x12\x1e.agent.PageServerStatusRequest\x1a\x1f.agent.PageServerStatusResponseB7Z5github.com/ddps-lab/criu-migration-operator/pkg/protob\x06proto3"
 
 var (
 	file_pkg_proto_agent_proto_rawDescOnce sync.Once
@@ -789,35 +942,43 @@ func file_pkg_proto_agent_proto_rawDescGZIP() []byte {
 	return file_pkg_proto_agent_proto_rawDescData
 }
 
-var file_pkg_proto_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_pkg_proto_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_pkg_proto_agent_proto_goTypes = []any{
-	(*PreCheckpointRequest)(nil),  // 0: agent.PreCheckpointRequest
-	(*PreCheckpointResponse)(nil), // 1: agent.PreCheckpointResponse
-	(*FinalDumpRequest)(nil),      // 2: agent.FinalDumpRequest
-	(*FinalDumpResponse)(nil),     // 3: agent.FinalDumpResponse
-	(*RestoreRequest)(nil),        // 4: agent.RestoreRequest
-	(*RestoreResponse)(nil),       // 5: agent.RestoreResponse
-	(*StatusRequest)(nil),         // 6: agent.StatusRequest
-	(*StatusResponse)(nil),        // 7: agent.StatusResponse
-	(*PageServerRequest)(nil),     // 8: agent.PageServerRequest
-	(*PageServerResponse)(nil),    // 9: agent.PageServerResponse
+	(*PreCheckpointRequest)(nil),     // 0: agent.PreCheckpointRequest
+	(*PreCheckpointResponse)(nil),    // 1: agent.PreCheckpointResponse
+	(*FinalDumpRequest)(nil),         // 2: agent.FinalDumpRequest
+	(*FinalDumpResponse)(nil),        // 3: agent.FinalDumpResponse
+	(*RestoreRequest)(nil),           // 4: agent.RestoreRequest
+	(*RestoreResponse)(nil),          // 5: agent.RestoreResponse
+	(*StatusRequest)(nil),            // 6: agent.StatusRequest
+	(*StatusResponse)(nil),           // 7: agent.StatusResponse
+	(*PageServerRequest)(nil),        // 8: agent.PageServerRequest
+	(*PageServerResponse)(nil),       // 9: agent.PageServerResponse
+	(*PageServerStatusRequest)(nil),  // 10: agent.PageServerStatusRequest
+	(*PageServerStatusResponse)(nil), // 11: agent.PageServerStatusResponse
+	nil,                              // 12: agent.FinalDumpResponse.ExternalMountsEntry
+	nil,                              // 13: agent.RestoreRequest.ExternalMountsEntry
 }
 var file_pkg_proto_agent_proto_depIdxs = []int32{
-	0, // 0: agent.CRIUAgent.PreCheckpoint:input_type -> agent.PreCheckpointRequest
-	2, // 1: agent.CRIUAgent.FinalDump:input_type -> agent.FinalDumpRequest
-	4, // 2: agent.CRIUAgent.Restore:input_type -> agent.RestoreRequest
-	6, // 3: agent.CRIUAgent.GetStatus:input_type -> agent.StatusRequest
-	8, // 4: agent.CRIUAgent.StartPageServer:input_type -> agent.PageServerRequest
-	1, // 5: agent.CRIUAgent.PreCheckpoint:output_type -> agent.PreCheckpointResponse
-	3, // 6: agent.CRIUAgent.FinalDump:output_type -> agent.FinalDumpResponse
-	5, // 7: agent.CRIUAgent.Restore:output_type -> agent.RestoreResponse
-	7, // 8: agent.CRIUAgent.GetStatus:output_type -> agent.StatusResponse
-	9, // 9: agent.CRIUAgent.StartPageServer:output_type -> agent.PageServerResponse
-	5, // [5:10] is the sub-list for method output_type
-	0, // [0:5] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	12, // 0: agent.FinalDumpResponse.external_mounts:type_name -> agent.FinalDumpResponse.ExternalMountsEntry
+	13, // 1: agent.RestoreRequest.external_mounts:type_name -> agent.RestoreRequest.ExternalMountsEntry
+	0,  // 2: agent.CRIUAgent.PreCheckpoint:input_type -> agent.PreCheckpointRequest
+	2,  // 3: agent.CRIUAgent.FinalDump:input_type -> agent.FinalDumpRequest
+	4,  // 4: agent.CRIUAgent.Restore:input_type -> agent.RestoreRequest
+	6,  // 5: agent.CRIUAgent.GetStatus:input_type -> agent.StatusRequest
+	8,  // 6: agent.CRIUAgent.StartPageServer:input_type -> agent.PageServerRequest
+	10, // 7: agent.CRIUAgent.CheckPageServerStatus:input_type -> agent.PageServerStatusRequest
+	1,  // 8: agent.CRIUAgent.PreCheckpoint:output_type -> agent.PreCheckpointResponse
+	3,  // 9: agent.CRIUAgent.FinalDump:output_type -> agent.FinalDumpResponse
+	5,  // 10: agent.CRIUAgent.Restore:output_type -> agent.RestoreResponse
+	7,  // 11: agent.CRIUAgent.GetStatus:output_type -> agent.StatusResponse
+	9,  // 12: agent.CRIUAgent.StartPageServer:output_type -> agent.PageServerResponse
+	11, // 13: agent.CRIUAgent.CheckPageServerStatus:output_type -> agent.PageServerStatusResponse
+	8,  // [8:14] is the sub-list for method output_type
+	2,  // [2:8] is the sub-list for method input_type
+	2,  // [2:2] is the sub-list for extension type_name
+	2,  // [2:2] is the sub-list for extension extendee
+	0,  // [0:2] is the sub-list for field type_name
 }
 
 func init() { file_pkg_proto_agent_proto_init() }
@@ -831,7 +992,7 @@ func file_pkg_proto_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_pkg_proto_agent_proto_rawDesc), len(file_pkg_proto_agent_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   10,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

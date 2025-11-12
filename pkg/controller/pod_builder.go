@@ -12,7 +12,7 @@ import (
 
 const (
 	AgentPort = 8080
-	WorkDir   = "/checkpoints"
+	WorkDir   = "/tmp/.criu-checkpoints" // Hidden dir in /tmp to avoid conflicts with user apps
 )
 
 var (
@@ -51,11 +51,28 @@ func NewPodBuilderWithCredentials(mapp *migrationv1alpha1.MigratableApp, awsAcce
 // BuildNormalPod builds a pod spec for normal mode (not restore)
 func (b *PodBuilder) BuildNormalPod(generation int) *corev1.Pod {
 	pod := b.buildBasePod(generation, "normal")
+
+	// Only for generation 0 (initial pod): Add initContainer to increase PID counter
+	// This ensures app container processes start with high PIDs (100+)
+	// so CRIU restore can recreate same PIDs without conflicts
+	if generation == 0 {
+		pidBoosterInit := corev1.Container{
+			Name:    "pid-booster",
+			Image:   "busybox:latest",
+			Command: []string{"/bin/sh", "-c"},
+			Args: []string{
+				"for i in $(seq 1 150); do /bin/true & done; wait",
+			},
+		}
+
+		pod.Spec.InitContainers = append(pod.Spec.InitContainers, pidBoosterInit)
+	}
+
 	return pod
 }
 
 // BuildRestorePod builds a pod spec for restore mode
-func (b *PodBuilder) BuildRestorePod(generation int, checkpointID, sourceNode string, s3Prefix string) *corev1.Pod {
+func (b *PodBuilder) BuildRestorePod(generation int, checkpointID, sourceNode string, s3Prefix string, sourcePodIP string) *corev1.Pod {
 	pod := b.buildBasePod(generation, "restore")
 
 	// Add restore-specific annotations
@@ -65,15 +82,13 @@ func (b *PodBuilder) BuildRestorePod(generation int, checkpointID, sourceNode st
 	pod.Annotations["migration.io/checkpoint-id"] = checkpointID
 	pod.Annotations["migration.io/source-node"] = sourceNode
 	pod.Annotations["migration.io/s3-prefix"] = s3Prefix
+	pod.Annotations["migration.io/source-pod-ip"] = sourcePodIP
 
-	// Modify app container CMD to sleep
-	for i := range pod.Spec.Containers {
-		if pod.Spec.Containers[i].Name == "app" {
-			pod.Spec.Containers[i].Command = []string{"sleep"}
-			pod.Spec.Containers[i].Args = []string{"infinity"}
-			break
-		}
-	}
+	// Keep app container spec identical to source pod
+	// The app container will run the same initialization (including dummy processes)
+	// This ensures consistent PID layout between source and target
+	// CRIU will handle process replacement during restore
+	// Note: No modification to Command/Args - uses original MigratableApp spec
 
 	// Add anti-affinity to avoid same node
 	if pod.Spec.Affinity == nil {
@@ -150,6 +165,7 @@ func (b *PodBuilder) buildBasePod(generation int, mode string) *corev1.Pod {
 	}
 	annotations["migration.io/generation"] = strconv.Itoa(generation)
 	annotations["migration.io/mode"] = mode
+	annotations["migration.io/app"] = b.mapp.Name // MigratableApp name for S3 path consistency
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -164,11 +180,41 @@ func (b *PodBuilder) buildBasePod(generation int, mode string) *corev1.Pod {
 		Spec: template.Spec,
 	}
 
-	// Modify app container (add capabilities)
+	// Modify app container (add capabilities and volume mount)
 	for i := range pod.Spec.Containers {
 		c := &pod.Spec.Containers[i]
 		if c.Name == "app" || i == 0 {
 			c.Name = "app" // Ensure name is set
+
+			// Save original command/args to annotations for agent to execute later
+			// This avoids mount namespace complexity from application mounts
+			if len(c.Command) > 0 || len(c.Args) > 0 {
+				// Serialize command and args as JSON-like format
+				if len(c.Command) > 0 {
+					cmdStr := ""
+					for i, cmd := range c.Command {
+						if i > 0 {
+							cmdStr += ","
+						}
+						cmdStr += cmd
+					}
+					pod.Annotations["migration.io/original-command"] = cmdStr
+				}
+				if len(c.Args) > 0 {
+					argsStr := ""
+					for i, arg := range c.Args {
+						if i > 0 {
+							argsStr += "|||" // Use special delimiter for args (can contain commas)
+						}
+						argsStr += arg
+					}
+					pod.Annotations["migration.io/original-args"] = argsStr
+				}
+
+				// Replace with sleep infinity to keep mount namespace clean
+				c.Command = []string{"sleep", "infinity"}
+				c.Args = nil
+			}
 
 			if c.SecurityContext == nil {
 				c.SecurityContext = &corev1.SecurityContext{}
@@ -177,6 +223,14 @@ func (b *PodBuilder) buildBasePod(generation int, mode string) *corev1.Pod {
 				c.SecurityContext.Capabilities = &corev1.Capabilities{}
 			}
 			c.SecurityContext.Capabilities.Add = append(c.SecurityContext.Capabilities.Add, "SYS_PTRACE")
+
+			// Mount checkpoints volume to main container at same path as agent
+			// This is needed because restore with nsenter -m -u -i -n -p (all namespaces)
+			// requires checkpoint files to be accessible in main container's mount namespace
+			c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
+				Name:      "checkpoints",
+				MountPath: "/tmp/.criu-checkpoints",
+			})
 		}
 	}
 
@@ -190,6 +244,21 @@ func (b *PodBuilder) buildBasePod(generation int, mode string) *corev1.Pod {
 			Name: "checkpoints",
 			VolumeSource: corev1.VolumeSource{
 				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		},
+		corev1.Volume{
+			Name: "podinfo",
+			VolumeSource: corev1.VolumeSource{
+				DownwardAPI: &corev1.DownwardAPIVolumeSource{
+					Items: []corev1.DownwardAPIVolumeFile{
+						{
+							Path: "annotations",
+							FieldRef: &corev1.ObjectFieldSelector{
+								FieldPath: "metadata.annotations",
+							},
+						},
+					},
+				},
 			},
 		},
 	)
@@ -252,10 +321,28 @@ func (b *PodBuilder) buildAgentContainer(mode string) corev1.Container {
 			Name:  "ASYNC_PREFETCH",
 			Value: strconv.FormatBool(b.mapp.Spec.Storage.AsyncPrefetch),
 		},
-		{
-			Name:  "POD_GENERATION",
-			Value: strconv.Itoa(b.mapp.Status.Generation),
+	}
+
+	// Add POD_GENERATION from annotation via Downward API (set in buildBasePod)
+	agentEnv = append(agentEnv, corev1.EnvVar{
+		Name: "POD_GENERATION",
+		ValueFrom: &corev1.EnvVarSource{
+			FieldRef: &corev1.ObjectFieldSelector{
+				FieldPath: "metadata.annotations['migration.io/generation']",
+			},
 		},
+	})
+
+	// Add SOURCE_POD_IP for restore mode (read from annotation via Downward API)
+	if mode == "restore" {
+		agentEnv = append(agentEnv, corev1.EnvVar{
+			Name: "SOURCE_POD_IP",
+			ValueFrom: &corev1.EnvVarSource{
+				FieldRef: &corev1.ObjectFieldSelector{
+					FieldPath: "metadata.annotations['migration.io/source-pod-ip']",
+				},
+			},
+		})
 	}
 
 	// Add AWS credentials if provided
@@ -287,6 +374,11 @@ func (b *PodBuilder) buildAgentContainer(mode string) corev1.Container {
 			{
 				Name:      "checkpoints",
 				MountPath: WorkDir,
+			},
+			{
+				Name:      "podinfo",
+				MountPath: "/etc/podinfo",
+				ReadOnly:  true,
 			},
 		},
 		SecurityContext: &corev1.SecurityContext{

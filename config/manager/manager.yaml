@@ -24,11 +24,11 @@ spec:
       serviceAccountName: migration-controller
       containers:
       - name: controller
-        image: REGISTRY/CONTROLLER_IMAGE
+        image: 166.104.75.152:5000/criu-migration-controller:latest
         imagePullPolicy: Always
         env:
         - name: AGENT_IMAGE
-          value: "REGISTRY/AGENT_IMAGE"
+          value: "166.104.75.152:5000/criu-agent:latest"
         args:
         - --leader-elect
         - --metrics-bind-address=:8080
@@ -79,7 +79,7 @@ spec:
       hostNetwork: true
       containers:
       - name: monitor
-        image: REGISTRY/MONITOR_IMAGE
+        image: 166.104.75.152:5000/criu-node-monitor:latest
         imagePullPolicy: Always
         env:
         - name: NODE_NAME

@@ -19,11 +19,12 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	CRIUAgent_PreCheckpoint_FullMethodName   = "/agent.CRIUAgent/PreCheckpoint"
-	CRIUAgent_FinalDump_FullMethodName       = "/agent.CRIUAgent/FinalDump"
-	CRIUAgent_Restore_FullMethodName         = "/agent.CRIUAgent/Restore"
-	CRIUAgent_GetStatus_FullMethodName       = "/agent.CRIUAgent/GetStatus"
-	CRIUAgent_StartPageServer_FullMethodName = "/agent.CRIUAgent/StartPageServer"
+	CRIUAgent_PreCheckpoint_FullMethodName         = "/agent.CRIUAgent/PreCheckpoint"
+	CRIUAgent_FinalDump_FullMethodName             = "/agent.CRIUAgent/FinalDump"
+	CRIUAgent_Restore_FullMethodName               = "/agent.CRIUAgent/Restore"
+	CRIUAgent_GetStatus_FullMethodName             = "/agent.CRIUAgent/GetStatus"
+	CRIUAgent_StartPageServer_FullMethodName       = "/agent.CRIUAgent/StartPageServer"
+	CRIUAgent_CheckPageServerStatus_FullMethodName = "/agent.CRIUAgent/CheckPageServerStatus"
 )
 
 // CRIUAgentClient is the client API for CRIUAgent service.
@@ -42,6 +43,8 @@ type CRIUAgentClient interface {
 	GetStatus(ctx context.Context, in *StatusRequest, opts ...grpc.CallOption) (*StatusResponse, error)
 	// StartPageServer starts the page-server for lazy restore
 	StartPageServer(ctx context.Context, in *PageServerRequest, opts ...grpc.CallOption) (*PageServerResponse, error)
+	// CheckPageServerStatus checks if a page-server process is still running
+	CheckPageServerStatus(ctx context.Context, in *PageServerStatusRequest, opts ...grpc.CallOption) (*PageServerStatusResponse, error)
 }
 
 type cRIUAgentClient struct {
@@ -102,6 +105,16 @@ func (c *cRIUAgentClient) StartPageServer(ctx context.Context, in *PageServerReq
 	return out, nil
 }
 
+func (c *cRIUAgentClient) CheckPageServerStatus(ctx context.Context, in *PageServerStatusRequest, opts ...grpc.CallOption) (*PageServerStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PageServerStatusResponse)
+	err := c.cc.Invoke(ctx, CRIUAgent_CheckPageServerStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CRIUAgentServer is the server API for CRIUAgent service.
 // All implementations must embed UnimplementedCRIUAgentServer
 // for forward compatibility.
@@ -118,6 +131,8 @@ type CRIUAgentServer interface {
 	GetStatus(context.Context, *StatusRequest) (*StatusResponse, error)
 	// StartPageServer starts the page-server for lazy restore
 	StartPageServer(context.Context, *PageServerRequest) (*PageServerResponse, error)
+	// CheckPageServerStatus checks if a page-server process is still running
+	CheckPageServerStatus(context.Context, *PageServerStatusRequest) (*PageServerStatusResponse, error)
 	mustEmbedUnimplementedCRIUAgentServer()
 }
 
@@ -142,6 +157,9 @@ func (UnimplementedCRIUAgentServer) GetStatus(context.Context, *StatusRequest) (
 }
 func (UnimplementedCRIUAgentServer) StartPageServer(context.Context, *PageServerRequest) (*PageServerResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method StartPageServer not implemented")
+}
+func (UnimplementedCRIUAgentServer) CheckPageServerStatus(context.Context, *PageServerStatusRequest) (*PageServerStatusResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CheckPageServerStatus not implemented")
 }
 func (UnimplementedCRIUAgentServer) mustEmbedUnimplementedCRIUAgentServer() {}
 func (UnimplementedCRIUAgentServer) testEmbeddedByValue()                   {}
@@ -254,6 +272,24 @@ func _CRIUAgent_StartPageServer_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _CRIUAgent_CheckPageServerStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PageServerStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CRIUAgentServer).CheckPageServerStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CRIUAgent_CheckPageServerStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CRIUAgentServer).CheckPageServerStatus(ctx, req.(*PageServerStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // CRIUAgent_ServiceDesc is the grpc.ServiceDesc for CRIUAgent service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -280,6 +316,10 @@ var CRIUAgent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "StartPageServer",
 			Handler:    _CRIUAgent_StartPageServer_Handler,
+		},
+		{
+			MethodName: "CheckPageServerStatus",
+			Handler:    _CRIUAgent_CheckPageServerStatus_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -20,6 +20,9 @@ service CRIUAgent {
 
   // StartPageServer starts the page-server for lazy restore
   rpc StartPageServer(PageServerRequest) returns (PageServerResponse);
+
+  // CheckPageServerStatus checks if a page-server process is still running
+  rpc CheckPageServerStatus(PageServerStatusRequest) returns (PageServerStatusResponse);
 }
 
 // PreCheckpointRequest contains parameters for pre-checkpoint
@@ -71,6 +74,12 @@ message FinalDumpResponse {
 
   // Size of metadata in bytes (pages sent via page-server)
   int64 metadata_size_bytes = 3;
+
+  // External mounts detected during dump (mountpoint -> identifier)
+  map<string, string> external_mounts = 4;
+
+  // PID of page-server process (for tracking completion)
+  int32 page_server_pid = 5;
 }
 
 // RestoreRequest contains parameters for restore
@@ -92,6 +101,9 @@ message RestoreRequest {
 
   // Source pod IP address (for lazy-pages to connect to)
   string source_addr = 6;
+
+  // External mounts to use during restore (mountpoint -> identifier)
+  map<string, string> external_mounts = 7;
 }
 
 // RestoreResponse contains the result of restore
@@ -158,4 +170,22 @@ message PageServerResponse {
 
   // Port it's listening on
   int32 port = 3;
+}
+
+// PageServerStatusRequest contains parameters for checking page-server status
+message PageServerStatusRequest {
+  // PID of page-server to check
+  int32 pid = 1;
+}
+
+// PageServerStatusResponse contains the page-server status
+message PageServerStatusResponse {
+  // Whether process is still running
+  bool is_alive = 1;
+
+  // Exit code if terminated (0 if still running)
+  int32 exit_code = 2;
+
+  // Human-readable status message
+  string status_message = 3;
 }

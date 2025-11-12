@@ -5,6 +5,7 @@ go 1.25.1
 require (
 	github.com/aws/aws-sdk-go v1.55.8
 	github.com/google/uuid v1.6.0
+	github.com/sirupsen/logrus v1.9.3
 	google.golang.org/grpc v1.76.0
 	google.golang.org/protobuf v1.36.10
 	k8s.io/api v0.34.1

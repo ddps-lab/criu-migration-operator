@@ -45,6 +45,57 @@ This operator provides:
 └─────────────────────────────────────────────────────────┘
 ```
 
+## Implementation Details
+
+### Sleep Infinity Approach
+
+The operator uses a "sleep infinity" pattern to avoid checkpointing the container's PID 1 process directly:
+
+1. **Pod starts with `sleep infinity` as PID 1** (specified in MigratableApp spec)
+2. **Agent launches the actual application via `nsenter`** during restore
+3. **CRIU only checkpoints the child process**, not PID 1
+
+Benefits:
+- PID 1 (sleep) remains unchanged across migrations
+- Avoids complications with container runtime expectations
+- Maintains namespace sharing for kubelet compatibility
+
+### Mount Namespace Handling
+
+The operator implements CRIU's `--join-ns mnt` feature to handle Kubernetes-injected mounts:
+
+**Challenge**: Kubernetes injects various mounts into containers:
+- `/dev/termination-log`
+- `/etc/hosts`, `/etc/resolv.conf`, `/etc/hostname`
+- ConfigMap/Secret volumes
+- Service account tokens
+
+**Solution**: Join the target pod's existing mount namespace instead of restoring:
+- **Dump**: Mark specific mounts as external (`--external mnt[path]:id`)
+- **Restore**: Use `--join-ns mnt:/proc/1/ns/mnt` to join target's mount namespace
+- **Result**: Target pod's mounts (managed by kubelet) are used directly
+
+**CRIU Bug Fix**: Fixed a bug in CRIU 4.0 where `--join-ns mnt` was not working correctly. See [CRIU_JOIN_NS_MNT_BUG_FIX.md](../criu_build/CRIU_JOIN_NS_MNT_BUG_FIX.md) for details.
+
+### Storage Strategy
+
+**During Dump**:
+- Upload ALL checkpoint files to S3, including `pages-*.img`
+- Even though pages are served via page-server during migration, they must be in S3 for lazy-pages daemon
+
+**During Restore**:
+- Download only metadata files from S3 (core, mm, files, etc.)
+- Skip downloading `pages-*.img` (too large, loaded on-demand)
+- Lazy-pages daemon fetches pages from S3 as needed
+
+**Benefit**: Fast restore startup time (~1-2 seconds) with on-demand page loading
+
+### AWS Credentials Strategy
+
+- **Regular S3**: Uses IAM roles or public access (no credentials needed in CRIU command)
+- **Express One Zone**: Requires explicit credentials (`--aws-access-key`, `--aws-secret-key`)
+- Agent conditionally includes credentials based on storage type
+
 ## Prerequisites
 
 ### Development Environment
@@ -623,12 +674,28 @@ kubernetes_integration/
 
 Apache License 2.0
 
+## Recent Updates
+
+### 2025-11-11: Page-Server Lifecycle Fix
+- **Fixed**: TCP health check killing page-server prematurely
+- **Solution**: Removed TCP dial from `waitForPageServerReady()` function
+- **Impact**: Stable zero-downtime migrations achieved
+- **Performance**: 1.8s restore time, 15.96s total migration time
+- **Details**: See [CRIU_MIGRATION_OPERATOR_DOCS.md](../../CRIU_MIGRATION_OPERATOR_DOCS.md#2025-11-11-오후-page-server-lifecycle-문제-해결-및-migration-성공)
+
+### 2025-11-11: CRIU `--join-ns mnt` Bug Fix
+- **Fixed**: CRIU 4.0 `--join-ns mnt` not working correctly
+- **Solution**: Clear `root_ns_mask` for joined namespaces in `prepare_namespace_before_tasks()`
+- **Impact**: Successful mount namespace handling in Kubernetes
+- **Details**: See [CRIU_JOIN_NS_MNT_BUG_FIX.md](../../criu_build/CRIU_JOIN_NS_MNT_BUG_FIX.md)
+
 ## References
 
 - [CRIU Documentation](https://criu.org/)
 - [Kubernetes Operator Pattern](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/)
 - [controller-runtime](https://github.com/kubernetes-sigs/controller-runtime)
 - [Kubebuilder](https://book.kubebuilder.io/)
+- [Full Documentation](../../CRIU_MIGRATION_OPERATOR_DOCS.md)
 
 ## Contact
 

@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	"os"
-	"strings"
 )
 
 // getExternalMounts reads /proc/PID/mountinfo and returns external mount options for CRIU
@@ -20,28 +19,11 @@ func getExternalMounts(pid int) (map[string]string, error) {
 	externalMounts := make(map[string]string)
 	scanner := bufio.NewScanner(file)
 
+	// TEMPORARY TEST: Disable ALL external mount detection
+	// When using --join-ns mnt, the joined namespace already has all mounts
+	// so marking them as external might cause conflicts
 	for scanner.Scan() {
-		line := scanner.Text()
-		fields := strings.Fields(line)
-		if len(fields) < 5 {
-			continue
-		}
-
-		mountPoint := fields[4]
-
-		// Kubernetes-specific external mounts that need to be preserved
-		// These are bind mounts from host into container
-		if strings.HasPrefix(mountPoint, "/etc/") ||
-			strings.HasPrefix(mountPoint, "/dev/termination-log") ||
-			strings.HasPrefix(mountPoint, "/run/secrets/kubernetes.io/serviceaccount") ||
-			strings.HasPrefix(mountPoint, "/dev/shm") {
-
-			// Create a simple identifier from the mountpoint path
-			// e.g., "/etc/resolv.conf" -> "etc-resolv-conf"
-			identifier := strings.ReplaceAll(strings.Trim(mountPoint, "/"), "/", "-")
-			externalMounts[mountPoint] = identifier
-			fmt.Printf("Detected external mount: %s -> %s\n", mountPoint, identifier)
-		}
+		// Just consume the scanner, don't add any mounts
 	}
 
 	if err := scanner.Err(); err != nil {
