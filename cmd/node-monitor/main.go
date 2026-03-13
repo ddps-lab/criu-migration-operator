@@ -17,9 +17,11 @@ import (
 func main() {
 	var kubeconfig string
 	var cloudType string
+	var enableIMDS bool
 
 	flag.StringVar(&kubeconfig, "kubeconfig", "", "Path to kubeconfig file (optional, for out-of-cluster testing)")
 	flag.StringVar(&cloudType, "cloud-type", "", "Cloud provider type: aws, gcp, or azure (auto-detect if empty)")
+	flag.BoolVar(&enableIMDS, "enable-imds", true, "Enable IMDS-based spot interruption detection")
 	flag.Parse()
 
 	// Get node name from environment
@@ -31,6 +33,7 @@ func main() {
 	log.Printf("Starting Node Monitor")
 	log.Printf("  Node Name: %s", nodeName)
 	log.Printf("  Cloud Type: %s", cloudType)
+	log.Printf("  Enable IMDS: %v", enableIMDS)
 
 	// Create Kubernetes client
 	var config *rest.Config
@@ -53,7 +56,7 @@ func main() {
 	}
 
 	// Create monitor
-	spotMonitor := monitor.NewSpotMonitor(nodeName, clientset, cloudType)
+	spotMonitor := monitor.NewSpotMonitorWithConfig(nodeName, clientset, cloudType, enableIMDS)
 
 	// Setup signal handling
 	ctx, cancel := context.WithCancel(context.Background())

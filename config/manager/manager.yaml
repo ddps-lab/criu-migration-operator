@@ -22,13 +22,18 @@ spec:
         app: migration-controller
     spec:
       serviceAccountName: migration-controller
+      tolerations:
+      - key: "capacity-type"
+        operator: "Equal"
+        value: "spot"
+        effect: "NoSchedule"
       containers:
       - name: controller
-        image: REGISTRY/CONTROLLER_IMAGE
+        image: 786382940258.dkr.ecr.us-east-1.amazonaws.com/criu-migration-controller:jglee-phase4
         imagePullPolicy: Always
         env:
         - name: AGENT_IMAGE
-          value: "REGISTRY/AGENT_IMAGE"
+          value: "REGISTRY/criu-agent:TAG"
         args:
         - --leader-elect
         - --metrics-bind-address=:8080
@@ -77,9 +82,26 @@ spec:
     spec:
       serviceAccountName: migration-controller
       hostNetwork: true
+      # Deploy only on spot nodes
+      nodeSelector:
+        capacity-type: spot
+      # Tolerate spot taints and temporary node unavailability
+      tolerations:
+      - key: "capacity-type"
+        operator: "Equal"
+        value: "spot"
+        effect: "NoSchedule"
+      - key: "node.kubernetes.io/not-ready"
+        operator: "Exists"
+        effect: "NoExecute"
+        tolerationSeconds: 300
+      - key: "node.kubernetes.io/unreachable"
+        operator: "Exists"
+        effect: "NoExecute"
+        tolerationSeconds: 300
       containers:
       - name: monitor
-        image: REGISTRY/MONITOR_IMAGE
+        image: 786382940258.dkr.ecr.us-east-1.amazonaws.com/criu-node-monitor:jglee-phase4
         imagePullPolicy: Always
         env:
         - name: NODE_NAME
@@ -87,7 +109,8 @@ spec:
             fieldRef:
               fieldPath: spec.nodeName
         args:
-        - --cloud-type=aws  # Change to gcp or azure as needed
+        - --cloud-type=aws
+        - --enable-imds
         resources:
           limits:
             cpu: 100m

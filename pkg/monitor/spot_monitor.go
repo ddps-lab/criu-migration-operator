@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -29,6 +30,7 @@ type SpotMonitor struct {
 	clientset     *kubernetes.Clientset
 	cloudType     string // "aws", "gcp", or "azure"
 	checkInterval time.Duration
+	Enabled       bool   // Feature flag for IMDS detection
 }
 
 // NewSpotMonitor creates a new spot monitor
@@ -38,13 +40,31 @@ func NewSpotMonitor(nodeName string, clientset *kubernetes.Clientset, cloudType 
 		clientset:     clientset,
 		cloudType:     cloudType,
 		checkInterval: 5 * time.Second,
+		Enabled:       true, // Default to enabled
+	}
+}
+
+// NewSpotMonitorWithConfig creates a new spot monitor with custom configuration
+func NewSpotMonitorWithConfig(nodeName string, clientset *kubernetes.Clientset, cloudType string, enabled bool) *SpotMonitor {
+	return &SpotMonitor{
+		nodeName:      nodeName,
+		clientset:     clientset,
+		cloudType:     cloudType,
+		checkInterval: 5 * time.Second,
+		Enabled:       enabled,
 	}
 }
 
 // Start starts the spot monitor
 func (m *SpotMonitor) Start(ctx context.Context) error {
 	logger := log.FromContext(ctx)
-	logger.Info("Starting Spot Monitor", "node", m.nodeName, "cloudType", m.cloudType)
+	logger.Info("Starting Spot Monitor", "node", m.nodeName, "cloudType", m.cloudType, "enabled", m.Enabled)
+
+	// Early return if disabled
+	if !m.Enabled {
+		logger.Info("Spot Monitor is disabled, exiting")
+		return nil
+	}
 
 	ticker := time.NewTicker(m.checkInterval)
 	defer ticker.Stop()
@@ -99,12 +119,49 @@ func (m *SpotMonitor) checkSpotInterruption(ctx context.Context) (bool, error) {
 	}
 }
 
-// checkAWSSpotInterruption checks AWS spot instance termination
+// getIMDSv2Token retrieves an IMDSv2 token for secure metadata access
+func (m *SpotMonitor) getIMDSv2Token(ctx context.Context) (string, error) {
+	client := &http.Client{Timeout: 2 * time.Second}
+	req, err := http.NewRequestWithContext(ctx, "PUT",
+		"http://169.254.169.254/latest/api/token", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("X-aws-ec2-metadata-token-ttl-seconds", "21600")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	token, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	return string(token), nil
+}
+
+// checkAWSSpotInterruption checks AWS spot instance termination using IMDSv2 with fallback to IMDSv1
 func (m *SpotMonitor) checkAWSSpotInterruption(ctx context.Context) (bool, error) {
 	client := &http.Client{Timeout: 2 * time.Second}
+
+	// Try IMDSv2 first
+	token, err := m.getIMDSv2Token(ctx)
+	if err != nil {
+		// IMDSv2 unavailable, will try IMDSv1
+		token = ""
+	}
+
 	req, err := http.NewRequestWithContext(ctx, "GET", spotTerminationEndpoint, nil)
 	if err != nil {
 		return false, err
+	}
+
+	// Use IMDSv2 token if available
+	if token != "" {
+		req.Header.Set("X-aws-ec2-metadata-token", token)
 	}
 
 	resp, err := client.Do(req)
@@ -115,7 +172,7 @@ func (m *SpotMonitor) checkAWSSpotInterruption(ctx context.Context) (bool, error
 	defer resp.Body.Close()
 
 	// 200 status means termination is scheduled
-	return resp.StatusCode == 200, nil
+	return resp.StatusCode == http.StatusOK, nil
 }
 
 // checkGCPPreemption checks GCP preemptible instance termination
@@ -157,15 +214,46 @@ func (m *SpotMonitor) checkAzureSpotInterruption(ctx context.Context) (bool, err
 	}
 	defer resp.Body.Close()
 
-	// Azure returns scheduled events in JSON
-	// For simplicity, we just check if there are any events
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return false, err
 	}
 
-	// Basic check: if response contains "Preempt", termination is scheduled
-	return len(body) > 0, nil
+	// Parse Azure scheduled events response
+	return m.parseAzureScheduledEvents(body)
+}
+
+// AzureScheduledEvents represents Azure scheduled events response
+type AzureScheduledEvents struct {
+	Events []AzureEvent `json:"Events"`
+}
+
+// AzureEvent represents a single Azure scheduled event
+type AzureEvent struct {
+	EventType string `json:"EventType"`
+	EventID   string `json:"EventId"`
+}
+
+// parseAzureScheduledEvents parses Azure scheduled events JSON and checks for termination
+func (m *SpotMonitor) parseAzureScheduledEvents(body []byte) (bool, error) {
+	if len(body) == 0 {
+		return false, nil
+	}
+
+	var events AzureScheduledEvents
+	if err := json.Unmarshal(body, &events); err != nil {
+		// If parsing fails, consider it as no interruption
+		return false, nil
+	}
+
+	// Check for Terminate or Preempt events
+	for _, event := range events.Events {
+		if event.EventType == "Terminate" || event.EventType == "Preempt" {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
 
 // handleSpotInterruption handles the spot interruption
@@ -173,7 +261,7 @@ func (m *SpotMonitor) handleSpotInterruption(ctx context.Context) error {
 	logger := log.FromContext(ctx)
 	logger.Info("Handling spot interruption", "node", m.nodeName)
 
-	// 1. Mark node as unschedulable
+	// 1. Mark node as unschedulable (idempotency check)
 	node, err := m.clientset.CoreV1().Nodes().Get(ctx, m.nodeName, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to get node: %w", err)
@@ -186,6 +274,8 @@ func (m *SpotMonitor) handleSpotInterruption(ctx context.Context) error {
 			return fmt.Errorf("failed to mark node unschedulable: %w", err)
 		}
 		logger.Info("Marked node as unschedulable", "node", m.nodeName)
+	} else {
+		logger.Info("Node is already unschedulable, skipping cordon", "node", m.nodeName)
 	}
 
 	// 2. Find all migratable pods on this node
@@ -200,11 +290,20 @@ func (m *SpotMonitor) handleSpotInterruption(ctx context.Context) error {
 	logger.Info("Found migratable pods", "count", len(pods.Items))
 
 	// 3. Add migration trigger annotation to each pod
+	timestamp := time.Now().UTC().Format(time.RFC3339)
 	for i := range pods.Items {
 		pod := &pods.Items[i]
 
 		// Skip pods that are already terminating
 		if pod.DeletionTimestamp != nil {
+			continue
+		}
+
+		// Skip pods that already have migration trigger to avoid re-triggering
+		if pod.Annotations != nil && pod.Annotations["migration.io/trigger"] == "requested" {
+			logger.Info("Pod already has migration trigger, skipping",
+				"pod", pod.Name,
+				"namespace", pod.Namespace)
 			continue
 		}
 
@@ -214,6 +313,8 @@ func (m *SpotMonitor) handleSpotInterruption(ctx context.Context) error {
 
 		pod.Annotations["migration.io/trigger"] = "requested"
 		pod.Annotations["migration.io/reason"] = "spot-interrupt"
+		pod.Annotations["migration.io/detection-method"] = "imds"
+		pod.Annotations["migration.io/detection-timestamp"] = timestamp
 
 		_, err := m.clientset.CoreV1().Pods(pod.Namespace).Update(ctx, pod, metav1.UpdateOptions{})
 		if err != nil {

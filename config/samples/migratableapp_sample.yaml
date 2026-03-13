@@ -55,10 +55,24 @@ spec:
     preferOnDemand: true
     migrationTimeoutSeconds: 300
 
-  # Object storage configuration
+  # Spot interruption handling with Dual-Path
+  spotInterruptionHandling:
+    enabled: true
+    detectionMethods:
+    - type: eventbridge
+      enabled: true
+      description: "Proactive detection via AWS EventBridge events"
+    - type: imds
+      enabled: true
+      cloudType: "aws"
+      pollIntervalSeconds: 5
+      description: "Reactive detection via EC2 IMDS metadata polling"
+
+  # Object storage configuration (S3 Express One Zone)
   storage:
     type: s3
-    bucket: criu-migration-checkpoints
-    endpoint: http://minio.default.svc.cluster.local:9000
-    region: us-east-1
+    bucket: "criu-checkpoints--use1-az6--x-s3"
+    endpoint: ""  # Use AWS default endpoint for S3 Express One Zone
+    region: "us-east-1"
+    expressOneZone: true
     credentialsSecret: s3-credentials
