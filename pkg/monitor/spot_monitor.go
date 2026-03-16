@@ -8,6 +8,9 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/cloudwatchlogs"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -22,7 +25,23 @@ const (
 
 	// Azure spot instance metadata endpoint
 	azureSpotEndpoint = "http://169.254.169.254/metadata/scheduledevents?api-version=2020-07-01"
+
+	// CloudWatch Logs configuration
+	logGroupName  = "jglee-spot-checker-multnode-log"
+	logStreamName = "imds-monitor"
 )
+
+// initCloudWatchLogsClient creates and returns a CloudWatch Logs client
+func initCloudWatchLogsClient() *cloudwatchlogs.CloudWatchLogs {
+	sess, err := session.NewSession(&aws.Config{
+		Region: aws.String("us-east-1"),
+	})
+	if err != nil {
+		// Log the error but don't fail - logging is non-critical
+		return nil
+	}
+	return cloudwatchlogs.New(sess)
+}
 
 // SpotMonitor monitors for spot instance interruptions
 type SpotMonitor struct {
@@ -31,27 +50,35 @@ type SpotMonitor struct {
 	cloudType     string // "aws", "gcp", or "azure"
 	checkInterval time.Duration
 	Enabled       bool   // Feature flag for IMDS detection
+	logsClient    *cloudwatchlogs.CloudWatchLogs
 }
 
 // NewSpotMonitor creates a new spot monitor
 func NewSpotMonitor(nodeName string, clientset *kubernetes.Clientset, cloudType string) *SpotMonitor {
+	logsClient := initCloudWatchLogsClient()
 	return &SpotMonitor{
 		nodeName:      nodeName,
 		clientset:     clientset,
 		cloudType:     cloudType,
-		checkInterval: 5 * time.Second,
+		checkInterval: 1 * time.Second,
 		Enabled:       true, // Default to enabled
+		logsClient:    logsClient,
 	}
 }
 
 // NewSpotMonitorWithConfig creates a new spot monitor with custom configuration
-func NewSpotMonitorWithConfig(nodeName string, clientset *kubernetes.Clientset, cloudType string, enabled bool) *SpotMonitor {
+func NewSpotMonitorWithConfig(nodeName string, clientset *kubernetes.Clientset, cloudType string, enabled bool, checkInterval time.Duration) *SpotMonitor {
+	if checkInterval <= 0 {
+		checkInterval = 1 * time.Second // Default to 1 second
+	}
+	logsClient := initCloudWatchLogsClient()
 	return &SpotMonitor{
 		nodeName:      nodeName,
 		clientset:     clientset,
 		cloudType:     cloudType,
-		checkInterval: 5 * time.Second,
+		checkInterval: checkInterval,
 		Enabled:       enabled,
+		logsClient:    logsClient,
 	}
 }
 
@@ -83,6 +110,7 @@ func (m *SpotMonitor) Start(ctx context.Context) error {
 
 			if interrupted {
 				logger.Info("Spot interruption detected!")
+				m.logToCloudWatch(ctx, "Spot interruption detected on node: "+m.nodeName)
 				if err := m.handleSpotInterruption(ctx); err != nil {
 					logger.Error(err, "Failed to handle spot interruption")
 				} else {
@@ -329,4 +357,64 @@ func (m *SpotMonitor) handleSpotInterruption(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// logToCloudWatch writes a log entry to CloudWatch Logs
+func (m *SpotMonitor) logToCloudWatch(ctx context.Context, message string) {
+	logger := log.FromContext(ctx)
+
+	// Always log to stdout
+	logger.Info(message)
+
+	// Try to write to CloudWatch Logs (synchronously to ensure delivery)
+	m.writeToCloudWatchAsync(message)
+}
+
+// writeToCloudWatchAsync writes to CloudWatch Logs synchronously using AWS SDK v1
+func (m *SpotMonitor) writeToCloudWatchAsync(message string) {
+	if m.logsClient == nil {
+		return
+	}
+
+	// Ensure log group and stream exist
+	m.ensureLogGroupAndStream()
+
+	// Prepare log event
+	timestamp := time.Now().Unix() * 1000 // Unix milliseconds
+	logEvent := &cloudwatchlogs.InputLogEvent{
+		Message:   aws.String(message),
+		Timestamp: aws.Int64(timestamp),
+	}
+
+	// Try to put log events
+	input := &cloudwatchlogs.PutLogEventsInput{
+		LogGroupName:  aws.String(logGroupName),
+		LogStreamName: aws.String(logStreamName),
+		LogEvents:     []*cloudwatchlogs.InputLogEvent{logEvent},
+	}
+
+	_, err := m.logsClient.PutLogEvents(input)
+	if err != nil {
+		// Log the error for debugging
+		fmt.Printf("Failed to write to CloudWatch Logs: %v\n", err)
+		return
+	}
+}
+
+// ensureLogGroupAndStream creates the log group and stream if they don't exist
+func (m *SpotMonitor) ensureLogGroupAndStream() {
+	if m.logsClient == nil {
+		return
+	}
+
+	// Try to create log group
+	_, _ = m.logsClient.CreateLogGroup(&cloudwatchlogs.CreateLogGroupInput{
+		LogGroupName: aws.String(logGroupName),
+	})
+
+	// Try to create log stream
+	_, _ = m.logsClient.CreateLogStream(&cloudwatchlogs.CreateLogStreamInput{
+		LogGroupName:  aws.String(logGroupName),
+		LogStreamName: aws.String(logStreamName),
+	})
 }

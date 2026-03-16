@@ -7,22 +7,35 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/ddps-lab/criu-migration-operator/pkg/monitor"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
 func main() {
 	var kubeconfig string
 	var cloudType string
 	var enableIMDS bool
+	var checkInterval time.Duration
 
 	flag.StringVar(&kubeconfig, "kubeconfig", "", "Path to kubeconfig file (optional, for out-of-cluster testing)")
 	flag.StringVar(&cloudType, "cloud-type", "", "Cloud provider type: aws, gcp, or azure (auto-detect if empty)")
 	flag.BoolVar(&enableIMDS, "enable-imds", true, "Enable IMDS-based spot interruption detection")
+	flag.DurationVar(&checkInterval, "check-interval", 1*time.Second, "IMDS polling interval")
 	flag.Parse()
+
+	// Initialize controller-runtime logger
+	opts := zap.Options{
+		Development: true,
+	}
+	opts.BindFlags(flag.CommandLine)
+	flag.Parse()
+	ctrllog.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	// Get node name from environment
 	nodeName := os.Getenv("NODE_NAME")
@@ -34,6 +47,7 @@ func main() {
 	log.Printf("  Node Name: %s", nodeName)
 	log.Printf("  Cloud Type: %s", cloudType)
 	log.Printf("  Enable IMDS: %v", enableIMDS)
+	log.Printf("  Check Interval: %v", checkInterval)
 
 	// Create Kubernetes client
 	var config *rest.Config
@@ -55,8 +69,8 @@ func main() {
 		log.Fatalf("Failed to create Kubernetes client: %v", err)
 	}
 
-	// Create monitor
-	spotMonitor := monitor.NewSpotMonitorWithConfig(nodeName, clientset, cloudType, enableIMDS)
+	// Create monitor (will use HTTP to write to CloudWatch Logs)
+	spotMonitor := monitor.NewSpotMonitorWithConfig(nodeName, clientset, cloudType, enableIMDS, checkInterval)
 
 	// Setup signal handling
 	ctx, cancel := context.WithCancel(context.Background())

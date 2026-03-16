@@ -65,6 +65,17 @@ resource "aws_iam_role_policy" "migration_controller" {
           "${aws_s3_directory_bucket.criu_checkpoints.arn}/*"
         ]
       },
+    {
+      Effect = "Allow"
+      Action = [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogGroups",
+        "logs:DescribeLogStreams"
+      ]
+      Resource = "arn:aws:logs:us-east-1:786382940258:log-group:/aws/eks/*"
+    },
       {
         Effect = "Allow"
         Action = [

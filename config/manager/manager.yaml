@@ -84,7 +84,7 @@ spec:
       hostNetwork: true
       # Deploy only on spot nodes
       nodeSelector:
-        capacity-type: spot
+        terminate-target: "true"
       # Tolerate spot taints and temporary node unavailability
       tolerations:
       - key: "capacity-type"
@@ -111,6 +111,7 @@ spec:
         args:
         - --cloud-type=aws
         - --enable-imds
+        - --check-interval=1s
         resources:
           limits:
             cpu: 100m
