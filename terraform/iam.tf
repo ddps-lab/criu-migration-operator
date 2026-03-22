@@ -74,7 +74,10 @@ resource "aws_iam_role_policy" "migration_controller" {
         "logs:DescribeLogGroups",
         "logs:DescribeLogStreams"
       ]
-      Resource = "arn:aws:logs:us-east-1:786382940258:log-group:/aws/eks/*"
+      Resource = [
+        "arn:aws:logs:us-east-1:786382940258:log-group:/aws/eks/*",
+        "arn:aws:logs:us-east-1:786382940258:log-group:jglee-spot-checker-multnode-log:*"
+      ]
     },
       {
         Effect = "Allow"
