@@ -7,13 +7,15 @@ WORKDIR /workspace
 RUN apk add --no-cache git make
 
 # Copy go mod files
-COPY go.mod go.sum ./
-RUN go mod download
+COPY go.mod ./
 
 # Copy source code
 COPY api/ api/
 COPY pkg/ pkg/
 COPY cmd/node-monitor/ cmd/node-monitor/
+
+# Download dependencies and ensure go.sum is up to date
+RUN go mod tidy && go mod download
 
 # Build
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -o node-monitor cmd/node-monitor/main.go
