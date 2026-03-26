@@ -55,10 +55,20 @@ spec:
     preferOnDemand: true
     migrationTimeoutSeconds: 300
 
-  # Object storage configuration
+  # Spot interruption handling
+  spotInterruptionHandling:
+    enabled: true
+    detectionMethods:
+    - type: imds
+      enabled: true
+      cloudType: "aws"
+      pollIntervalSeconds: 5
+
+  # Object storage configuration (S3 Express One Zone)
   storage:
     type: s3
-    bucket: criu-migration-checkpoints
-    endpoint: http://minio.default.svc.cluster.local:9000
-    region: us-east-1
+    bucket: "criu-checkpoints--use1-az6--x-s3"
+    endpoint: ""  # Use AWS default endpoint for S3 Express One Zone
+    region: "us-east-1"
+    expressOneZone: true
     credentialsSecret: s3-credentials

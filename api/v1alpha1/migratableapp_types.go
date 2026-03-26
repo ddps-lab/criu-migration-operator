@@ -18,6 +18,9 @@ type MigratableAppSpec struct {
 	// MigrationPolicy defines migration behavior
 	MigrationPolicy MigrationPolicy `json:"migrationPolicy,omitempty"`
 
+	// SpotInterruptionHandling defines spot instance interruption detection configuration
+	SpotInterruptionHandling SpotInterruptionHandling `json:"spotInterruptionHandling,omitempty"`
+
 	// Storage defines object storage configuration
 	Storage StorageConfig `json:"storage"`
 }
@@ -57,6 +60,35 @@ type MigrationPolicy struct {
 	// MigrationTimeoutSeconds is the timeout for migration operation
 	// +kubebuilder:default=300
 	MigrationTimeoutSeconds int `json:"migrationTimeoutSeconds,omitempty"`
+}
+
+// SpotInterruptionHandling defines spot instance interruption detection configuration
+type SpotInterruptionHandling struct {
+	// Enabled enables spot interruption handling
+	// +kubebuilder:default=true
+	Enabled bool `json:"enabled,omitempty"`
+
+	// DetectionMethods defines which detection methods to use
+	DetectionMethods []DetectionMethod `json:"detectionMethods,omitempty"`
+}
+
+// DetectionMethod defines a spot interruption detection method
+type DetectionMethod struct {
+	// Type of detection method (imds)
+	// +kubebuilder:validation:Enum=imds
+	Type string `json:"type"`
+
+	// Enabled enables this detection method
+	// +kubebuilder:default=true
+	Enabled bool `json:"enabled,omitempty"`
+
+	// CloudType specifies the cloud provider (aws, gcp, azure) - auto-detected if empty
+	// +kubebuilder:validation:Enum=aws;gcp;azure;""
+	CloudType string `json:"cloudType,omitempty"`
+
+	// PollIntervalSeconds is the poll interval in seconds for IMDS detection
+	// +kubebuilder:default=5
+	PollIntervalSeconds int `json:"pollIntervalSeconds,omitempty"`
 }
 
 // StorageConfig defines object storage configuration

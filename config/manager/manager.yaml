@@ -22,6 +22,11 @@ spec:
         app: migration-controller
     spec:
       serviceAccountName: migration-controller
+      tolerations:
+      - key: "capacity-type"
+        operator: "Equal"
+        value: "spot"
+        effect: "NoSchedule"
       containers:
       - name: controller
         image: 166.104.75.152:5000/criu-migration-controller:latest
@@ -77,6 +82,23 @@ spec:
     spec:
       serviceAccountName: migration-controller
       hostNetwork: true
+      # Deploy only on spot nodes
+      nodeSelector:
+        terminate-target: "true"
+      # Tolerate spot taints and temporary node unavailability
+      tolerations:
+      - key: "capacity-type"
+        operator: "Equal"
+        value: "spot"
+        effect: "NoSchedule"
+      - key: "node.kubernetes.io/not-ready"
+        operator: "Exists"
+        effect: "NoExecute"
+        tolerationSeconds: 300
+      - key: "node.kubernetes.io/unreachable"
+        operator: "Exists"
+        effect: "NoExecute"
+        tolerationSeconds: 300
       containers:
       - name: monitor
         image: 166.104.75.152:5000/criu-node-monitor:latest
@@ -87,7 +109,9 @@ spec:
             fieldRef:
               fieldPath: spec.nodeName
         args:
-        - --cloud-type=aws  # Change to gcp or azure as needed
+        - --cloud-type=aws
+        - --enable-imds
+        - --check-interval=1s
         resources:
           limits:
             cpu: 100m

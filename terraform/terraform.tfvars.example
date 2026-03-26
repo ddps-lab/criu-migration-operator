@@ -1,0 +1,15 @@
+aws_region    = "us-east-1"
+aws_profile   = "default"
+prefix        = "myname"
+
+# cluster_version    = "1.31"
+# vpc_cidr           = "10.0.0.0/16"
+# worker_instance_type = "m5.large"
+# worker_desired_size  = 2
+# worker_min_size      = 1
+# worker_max_size      = 3
+
+# tags = {
+#   Environment = "dev"
+#   Project     = "criu-migration"
+# }
