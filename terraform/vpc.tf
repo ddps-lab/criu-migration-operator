@@ -5,18 +5,19 @@ module "vpc" {
   name = "${var.prefix}-criu-migration-vpc"
   cidr = var.vpc_cidr
 
-  # Include standard AZs for spot node deployment
-  azs             = ["${var.aws_region}a", "${var.aws_region}b", "${var.aws_region}c"]
-  private_subnets = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
-  public_subnets  = ["10.0.101.0/24", "10.0.102.0/24", "10.0.103.0/24"]
+  azs            = slice(data.aws_availability_zones.available.names, 0, 2)
+  public_subnets = [cidrsubnet(var.vpc_cidr, 8, 1), cidrsubnet(var.vpc_cidr, 8, 2)]
 
-  enable_nat_gateway = true
-  single_nat_gateway = true  # Cost optimization for testing environment
+  # Public-only: no NAT gateway needed
+  enable_nat_gateway = false
 
-  tags = merge(
-    var.tags,
-    {
-      "kubernetes.io/cluster/${var.prefix}-criu-migration-test" = "shared"
-    }
-  )
+  # Auto-assign public IPs for nodes in public subnets
+  map_public_ip_on_launch = true
+
+  public_subnet_tags = {
+    "kubernetes.io/role/elb"                                          = "1"
+    "kubernetes.io/cluster/${var.prefix}-criu-migration-cluster" = "shared"
+  }
+
+  tags = var.tags
 }

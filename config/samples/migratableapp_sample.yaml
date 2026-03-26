@@ -55,18 +55,14 @@ spec:
     preferOnDemand: true
     migrationTimeoutSeconds: 300
 
-  # Spot interruption handling with Dual-Path
+  # Spot interruption handling
   spotInterruptionHandling:
     enabled: true
     detectionMethods:
-    - type: eventbridge
-      enabled: true
-      description: "Proactive detection via AWS EventBridge events"
     - type: imds
       enabled: true
       cloudType: "aws"
       pollIntervalSeconds: 5
-      description: "Reactive detection via EC2 IMDS metadata polling"
 
   # Object storage configuration (S3 Express One Zone)
   storage:

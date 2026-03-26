@@ -74,16 +74,13 @@ type SpotInterruptionHandling struct {
 
 // DetectionMethod defines a spot interruption detection method
 type DetectionMethod struct {
-	// Type of detection method (eventbridge, imds)
-	// +kubebuilder:validation:Enum=eventbridge;imds
+	// Type of detection method (imds)
+	// +kubebuilder:validation:Enum=imds
 	Type string `json:"type"`
 
 	// Enabled enables this detection method
 	// +kubebuilder:default=true
 	Enabled bool `json:"enabled,omitempty"`
-
-	// WebhookSecretName references a secret containing webhook credentials
-	WebhookSecretName string `json:"webhookSecretName,omitempty"`
 
 	// CloudType specifies the cloud provider (aws, gcp, azure) - auto-detected if empty
 	// +kubebuilder:validation:Enum=aws;gcp;azure;""
