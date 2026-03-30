@@ -545,3 +545,41 @@ func (c *S3Client) getCRIUObjectPrefix(s3Prefix string) string {
 	}
 	return s3Prefix + "/"
 }
+
+// BuildCRIUObjectStorageArgs returns all CRIU object-storage command-line arguments
+// for the given s3Prefix. Used by both Restore() and StartPageServer() to avoid duplication.
+func (c *S3Client) BuildCRIUObjectStorageArgs(s3Prefix string) []string {
+	if c == nil {
+		return nil
+	}
+
+	args := []string{
+		"--enable-object-storage",
+		"--object-storage-endpoint-url", c.getDownloadEndpoint(),
+	}
+
+	if c.needsBucketOption() {
+		args = append(args, "--object-storage-bucket", c.bucket)
+	}
+
+	if s3Prefix != "" {
+		args = append(args, "--object-storage-object-prefix", c.getCRIUObjectPrefix(s3Prefix))
+	}
+
+	if c.needsCRIUCredentials() {
+		awsAccessKey := os.Getenv("AWS_ACCESS_KEY_ID")
+		awsSecretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+		if awsAccessKey != "" && awsSecretKey != "" {
+			args = append(args,
+				"--aws-access-key", awsAccessKey,
+				"--aws-secret-key", awsSecretKey,
+				"--aws-region", c.region,
+			)
+		}
+		if c.needsCRIUExpressOneZone() {
+			args = append(args, "--express-one-zone")
+		}
+	}
+
+	return args
+}

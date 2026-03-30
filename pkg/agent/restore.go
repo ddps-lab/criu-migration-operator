@@ -152,17 +152,12 @@ func (m *RestoreManager) Restore(ctx context.Context, dumpID, s3Prefix string, u
 		"--join-ns", fmt.Sprintf("net:/proc/%d/ns/net", mainPID), // Network namespace
 	)
 
-	// External mount mappings for CRIU validation
-	// Even with --join-ns mnt, CRIU reads the mount namespace image to validate it.
-	// We need to provide mappings for all external mounts marked during dump.
-	// The actual paths don't matter since we're not restoring mounts (due to --join-ns mnt).
-	//
-	// Note: Format reverses from dump: dump uses mnt[path]:id, restore uses mnt[id]:path
-	// We DON'T include /dev here - let CRIU handle it normally (won't umount due to --join-ns mnt)
-	args = append(args, "--external", "mnt[dev-termination-log]:/dev/termination-log")
-	args = append(args, "--external", "mnt[etc-hosts]:/etc/hosts")
-	args = append(args, "--external", "mnt[etc-hostname]:/etc/hostname")
-	args = append(args, "--external", "mnt[etc-resolv-conf]:/etc/resolv.conf")
+	// External mount mappings for CRIU validation.
+	// Format reverses from dump: dump uses mnt[path]:label, restore uses mnt[label]:path.
+	// externalMounts map is {mountPoint -> label} from dump, so we reverse for restore.
+	for mountPoint, label := range externalMounts {
+		args = append(args, "--external", fmt.Sprintf("mnt[%s]:%s", label, mountPoint))
+	}
 
 	// Auto-detect other external mounts (shared/slave mounts)
 	args = append(args, "--ext-mount-map", "auto")
@@ -173,39 +168,8 @@ func (m *RestoreManager) Restore(ctx context.Context, dumpID, s3Prefix string, u
 
 	// Add S3/object storage options (use download endpoint for restore)
 	// For "full" strategy, all files are already local — skip object-storage args.
-	if m.s3Client != nil && strategy != "full" {
-		args = append(args,
-			"--enable-object-storage",
-			"--object-storage-endpoint-url", m.s3Client.getDownloadEndpoint(),
-		)
-
-		// Add bucket only if needed (MinIO and CloudFront skip this)
-		if m.s3Client.needsBucketOption() {
-			args = append(args,
-				"--object-storage-bucket", m.s3Client.bucket,
-			)
-		}
-
-		// Use getCRIUObjectPrefix which prepends bucket for MinIO (path-style)
-		args = append(args,
-			"--object-storage-object-prefix", m.s3Client.getCRIUObjectPrefix(s3Prefix),
-		)
-
-		// Add AWS credentials for MinIO and S3 Express One Zone
-		if m.s3Client.needsCRIUCredentials() {
-			awsAccessKey := os.Getenv("AWS_ACCESS_KEY_ID")
-			awsSecretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
-			if awsAccessKey != "" && awsSecretKey != "" {
-				args = append(args,
-					"--aws-access-key", awsAccessKey,
-					"--aws-secret-key", awsSecretKey,
-					"--aws-region", m.s3Client.region,
-				)
-			}
-			if m.s3Client.needsCRIUExpressOneZone() {
-				args = append(args, "--express-one-zone")
-			}
-		}
+	if strategy != "full" {
+		args = append(args, m.s3Client.BuildCRIUObjectStorageArgs(s3Prefix)...)
 	}
 
 	// Replace dumped pipes with new pipe pairs to prevent SIGPIPE.
@@ -334,43 +298,8 @@ func (m *RestoreManager) StartPageServer(ctx context.Context, port int, checkpoi
 		args = append(args, "--async-prefetch")
 	}
 
-	// Add S3/object storage options for lazy-pages (use download endpoint)
-	if m.s3Client != nil {
-		args = append(args,
-			"--enable-object-storage",
-			"--object-storage-endpoint-url", m.s3Client.getDownloadEndpoint(),
-		)
-
-		// Add bucket only if needed (MinIO and CloudFront skip this)
-		if m.s3Client.needsBucketOption() {
-			args = append(args,
-				"--object-storage-bucket", m.s3Client.bucket,
-			)
-		}
-
-		// Add object storage prefix (same as restore)
-		if s3Prefix != "" {
-			args = append(args,
-				"--object-storage-object-prefix", m.s3Client.getCRIUObjectPrefix(s3Prefix),
-			)
-		}
-
-		// Add AWS credentials for MinIO and S3 Express One Zone
-		if m.s3Client.needsCRIUCredentials() {
-			awsAccessKey := os.Getenv("AWS_ACCESS_KEY_ID")
-			awsSecretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
-			if awsAccessKey != "" && awsSecretKey != "" {
-				args = append(args,
-					"--aws-access-key", awsAccessKey,
-					"--aws-secret-key", awsSecretKey,
-					"--aws-region", m.s3Client.region,
-				)
-			}
-			if m.s3Client.needsCRIUExpressOneZone() {
-				args = append(args, "--express-one-zone")
-			}
-		}
-	}
+	// Add S3/object storage options for lazy-pages
+	args = append(args, m.s3Client.BuildCRIUObjectStorageArgs(s3Prefix)...)
 
 	fmt.Printf("======================================\n")
 	fmt.Printf("EXECUTING LAZY-PAGES COMMAND:\n")

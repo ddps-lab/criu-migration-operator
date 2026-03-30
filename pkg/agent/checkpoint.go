@@ -221,15 +221,14 @@ func (m *CheckpointManager) FinalDump(ctx context.Context, pid int, pageServerAd
 	// Mark PID namespace as external (will be injected via inherit-fd during restore)
 	args = append(args, "--external", fmt.Sprintf("pid[%s]:main_pidns", pidNsInode))
 
-	// Mark Kubernetes-injected file mounts as external (these exist in target pod too)
-	// Note: We DON'T mark /dev as external - let CRIU handle it normally during dump,
-	// and skip it during restore via --join-ns mnt (which skips all mount restoration)
-	args = append(args, "--external", "mnt[/dev/termination-log]:dev-termination-log")
-	args = append(args, "--external", "mnt[/etc/hosts]:etc-hosts")
-	args = append(args, "--external", "mnt[/etc/hostname]:etc-hostname")
-	args = append(args, "--external", "mnt[/etc/resolv.conf]:etc-resolv-conf")
+	// Mark K8s-injected bind mounts as external (dynamically detected from mountinfo).
+	// These mounts exist in both source and target pods, so CRIU should not try to
+	// save/restore them — instead they are mapped via --external on restore.
+	for mountPoint, label := range externalMounts {
+		args = append(args, "--external", fmt.Sprintf("mnt[%s]:%s", mountPoint, label))
+	}
 
-	// Auto-detect other external mounts (shared/slave mounts like /dev/shm, serviceaccount token)
+	// Auto-detect shared/slave mounts that getExternalMounts might miss
 	args = append(args, "--external", "mnt[]:ms")
 
 	// Record stdout/stderr pipe inodes for restore-time replacement.
