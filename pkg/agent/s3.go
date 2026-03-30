@@ -21,6 +21,7 @@ type S3Client struct {
 	endpoint         string
 	downloadEndpoint string // Separate endpoint for downloads (e.g., CloudFront)
 	region           string
+	storageType      string // "s3", "minio", etc.
 	expressOneZone   bool
 	session          *session.Session
 	uploader         *s3manager.Uploader
@@ -28,11 +29,11 @@ type S3Client struct {
 
 // NewS3Client creates a new S3 client
 func NewS3Client(bucket, endpoint, region string) (*S3Client, error) {
-	return NewS3ClientWithOptions(bucket, endpoint, "", region, false)
+	return NewS3ClientWithOptions(bucket, endpoint, "", region, "", false)
 }
 
 // NewS3ClientWithOptions creates a new S3 client with advanced options
-func NewS3ClientWithOptions(bucket, endpoint, downloadEndpoint, region string, expressOneZone bool) (*S3Client, error) {
+func NewS3ClientWithOptions(bucket, endpoint, downloadEndpoint, region, storageType string, expressOneZone bool) (*S3Client, error) {
 	cfg := &aws.Config{
 		Region: aws.String(region),
 	}
@@ -52,6 +53,7 @@ func NewS3ClientWithOptions(bucket, endpoint, downloadEndpoint, region string, e
 		endpoint:         endpoint,
 		downloadEndpoint: downloadEndpoint,
 		region:           region,
+		storageType:      storageType,
 		expressOneZone:   expressOneZone,
 		session:          sess,
 		uploader:         s3manager.NewUploader(sess),
@@ -247,6 +249,46 @@ func (c *S3Client) DownloadMetadataOnly(ctx context.Context, s3Prefix, localDir 
 	// Download filtered files in parallel, preserving directory structure
 	// Use basePath instead of s3Prefix to preserve full checkpoint chain structure
 	return c.downloadFilesParallel(ctx, basePath, localDir, metadataFiles)
+}
+
+// DownloadFullCheckpoint downloads all checkpoint files including pages-*.img
+// Used by "full" strategy where all pages must be available locally before restore.
+func (c *S3Client) DownloadFullCheckpoint(ctx context.Context, s3Prefix, localDir string) error {
+	basePath := s3Prefix
+	if strings.HasSuffix(basePath, "/") {
+		basePath = strings.TrimSuffix(basePath, "/")
+	}
+	parts := strings.Split(basePath, "/")
+	if len(parts) > 0 {
+		basePath = strings.Join(parts[:len(parts)-1], "/")
+	}
+	if basePath != "" && !strings.HasSuffix(basePath, "/") {
+		basePath += "/"
+	}
+
+	fmt.Printf("Downloading full checkpoint (including pages) from base path: %s\n", basePath)
+
+	svc := s3.New(c.session)
+	listInput := &s3.ListObjectsV2Input{
+		Bucket: aws.String(c.bucket),
+		Prefix: aws.String(basePath),
+	}
+
+	var allFiles []string
+	err := svc.ListObjectsV2PagesWithContext(ctx, listInput,
+		func(page *s3.ListObjectsV2Output, lastPage bool) bool {
+			for _, obj := range page.Contents {
+				allFiles = append(allFiles, *obj.Key)
+			}
+			return true
+		})
+	if err != nil {
+		return fmt.Errorf("failed to list objects: %w", err)
+	}
+
+	fmt.Printf("Found %d files in checkpoint chain (including pages)\n", len(allFiles))
+
+	return c.downloadFilesParallel(ctx, basePath, localDir, allFiles)
 }
 
 // downloadFilesParallel downloads multiple files in parallel
@@ -462,13 +504,44 @@ func (c *S3Client) isExpressOneZone() bool {
 	return c.expressOneZone
 }
 
+// isMinIO returns whether the storage type is MinIO (S3-compatible, path-style only)
+func (c *S3Client) isMinIO() bool {
+	return c.storageType == "minio"
+}
+
 // needsBucketOption returns whether CRIU needs --object-storage-bucket option
-// CloudFront (CDN) doesn't use bucket concept, so we skip it
+// MinIO and CloudFront don't use virtual-hosted bucket style
 func (c *S3Client) needsBucketOption() bool {
-	// If download endpoint is set and different from upload endpoint,
-	// it's likely a CDN (CloudFront) which doesn't need bucket option
+	// MinIO: CRIU uses virtual-hosted style (bucket.endpoint) which doesn't resolve.
+	// Instead, we skip --object-storage-bucket and prepend bucket to the prefix.
+	if c.isMinIO() {
+		return false
+	}
+	// CloudFront (CDN) doesn't use bucket concept
 	if c.downloadEndpoint != "" && c.downloadEndpoint != c.endpoint {
 		return false
 	}
 	return true
+}
+
+// needsCRIUCredentials returns whether CRIU needs explicit --aws-access-key/--aws-secret-key flags
+// MinIO and S3 Express One Zone require explicit credentials for CRIU's libcurl-based client
+func (c *S3Client) needsCRIUCredentials() bool {
+	return c.isMinIO() || c.expressOneZone
+}
+
+// needsCRIUExpressOneZone returns whether CRIU needs --express-one-zone flag.
+// With updated CRIU (24cece02a+), SigV4 is enabled by default when credentials are provided,
+// so MinIO no longer needs --express-one-zone (which triggers S3 Express session creation).
+func (c *S3Client) needsCRIUExpressOneZone() bool {
+	return c.expressOneZone
+}
+
+// getCRIUObjectPrefix returns the object prefix for CRIU commands.
+// For MinIO, bucket is prepended to the prefix (path-style).
+func (c *S3Client) getCRIUObjectPrefix(s3Prefix string) string {
+	if c.isMinIO() {
+		return c.bucket + "/" + s3Prefix + "/"
+	}
+	return s3Prefix + "/"
 }

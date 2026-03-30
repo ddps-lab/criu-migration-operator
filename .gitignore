@@ -7,6 +7,10 @@
 bin/
 testbin/
 criu/
+criu-binary
+criu-ns-binary
+deploy/agent/criu
+deploy/agent/criu-ns
 
 # Test binary, built with `go test -c`
 *.test
@@ -32,3 +36,6 @@ vendor/
 
 # Temporary files
 tmp/
+
+# Documentation (generated/internal)
+docs/

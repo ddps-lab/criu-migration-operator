@@ -95,27 +95,32 @@ func (r *MigratableAppReconciler) performMigration(
 	}
 	defer targetAgent.Close()
 
-	// Step 6: Perform final dump on source (source acts as page-server)
-	logger.Info("Performing final dump on source")
-	dumpResp, err := sourceAgent.FinalDump(ctx, targetPod.Status.PodIP, 9999, lastCheckpointID)
+	// Determine migration strategy
+	strategy := mapp.Spec.MigrationPolicy.Strategy
+	if strategy == "" {
+		strategy = "lazy-storage" // default
+	}
+	logger.Info("Migration strategy", "strategy", strategy)
+
+	// Step 6: Perform final dump on source
+	logger.Info("Performing final dump on source", "strategy", strategy)
+	dumpResp, err := sourceAgent.FinalDump(ctx, targetPod.Status.PodIP, 9999, lastCheckpointID, strategy)
 	if err != nil {
 		logger.Error(err, "Final dump failed")
 		r.Delete(ctx, targetPod) // Cleanup
 		return r.handleMigrationFailure(ctx, mapp, sourcePod, "FinalDumpFailed", err.Error())
 	}
 
-	logger.Info("Final dump started (running as page-server)", "dumpID", dumpResp.DumpId)
+	logger.Info("Final dump completed", "dumpID", dumpResp.DumpId, "strategy", strategy)
 
 	// Extract external mounts from dump response
 	externalMounts := dumpResp.ExternalMounts
 	logger.Info("Received external mounts from source", "count", len(externalMounts), "mounts", externalMounts)
 
-	// Step 7: Update target pod annotations with actual dump ID and S3 prefix
-	// S3 prefix format: checkpoints/{app-name}/{generation}/{node-name}/{checkpoint-id}
+	// Step 7: Update target pod annotations
 	actualS3Prefix := fmt.Sprintf("checkpoints/%s/%d/%s/%s",
 		mapp.Name, mapp.Status.Generation, sourcePod.Spec.NodeName, dumpResp.DumpId)
 
-	// Refresh target pod to get latest resource version
 	if err := r.Get(ctx, client.ObjectKeyFromObject(targetPod), targetPod); err != nil {
 		logger.Error(err, "Failed to refresh target pod")
 		r.Delete(ctx, targetPod) // Cleanup
@@ -132,20 +137,30 @@ func (r *MigratableAppReconciler) performMigration(
 
 	logger.Info("Updated target pod with checkpoint info", "dumpID", dumpResp.DumpId, "s3Prefix", actualS3Prefix)
 
-	// Step 8: Wait for metadata to be uploaded to S3 (asynchronous upload)
-	logger.Info("Waiting for metadata upload to S3")
-	time.Sleep(5 * time.Second) // Give time for metadata upload
+	// Step 8: Strategy-specific pre-restore steps
+	usePageServer := strategy == "lazy-direct" || strategy == "lazy-hybrid"
+	useLazyPages := strategy != "full"
 
-	// Step 8.5: Wait for page-server to be ready (accepting connections)
-	if err := r.waitForPageServerReady(ctx, sourcePod.Status.PodIP, 9999, 30*time.Second); err != nil {
-		logger.Error(err, "Page-server not ready")
-		r.Delete(ctx, targetPod) // Cleanup
-		return r.handleMigrationFailure(ctx, mapp, sourcePod, "PageServerNotReady", err.Error())
+	if strategy == "full" || strategy == "lazy-storage" {
+		// Storage-based: FinalDump already uploaded synchronously, no page-server wait needed
+		logger.Info("Storage upload completed by agent (synchronous)")
+	} else {
+		// Page-server strategies: wait for async upload and page-server readiness
+		logger.Info("Waiting for metadata upload to storage")
+		time.Sleep(5 * time.Second)
+	}
+
+	if usePageServer {
+		if err := r.waitForPageServerReady(ctx, sourcePod.Status.PodIP, 9999, 30*time.Second); err != nil {
+			logger.Error(err, "Page-server not ready")
+			r.Delete(ctx, targetPod) // Cleanup
+			return r.handleMigrationFailure(ctx, mapp, sourcePod, "PageServerNotReady", err.Error())
+		}
 	}
 
 	// Step 9: Restore on target
-	logger.Info("Performing restore on target")
-	restoreResp, err := targetAgent.Restore(ctx, dumpResp.DumpId, mapp.Spec.Storage.Bucket, actualS3Prefix, sourcePod.Status.PodIP, externalMounts)
+	logger.Info("Performing restore on target", "strategy", strategy)
+	restoreResp, err := targetAgent.Restore(ctx, dumpResp.DumpId, mapp.Spec.Storage.Bucket, actualS3Prefix, sourcePod.Status.PodIP, externalMounts, strategy, dumpResp.PipeInodes)
 	if err != nil {
 		logger.Error(err, "Restore failed")
 		r.Delete(ctx, targetPod) // Cleanup
@@ -156,30 +171,23 @@ func (r *MigratableAppReconciler) performMigration(
 		"newPID", restoreResp.NewPid,
 		"duration", restoreResp.DurationMs)
 
-	// Step 9.5: Wait for lazy-pages to connect to page-server
-	// IMPORTANT: Restore RPC returns after starting restore process, but lazy-pages
-	// only connects to page-server AFTER restore process starts and requests pages.
-	// This typically takes 1-2 seconds. We must wait for the connection to establish
-	// before checking page-server completion, otherwise we'll see page-server as "terminated"
-	// when it's actually still waiting for the connection!
-	logger.Info("Waiting for lazy-pages to connect to page-server", "delay", "5s")
-	time.Sleep(5 * time.Second)
+	// Step 10: Strategy-specific post-restore steps
+	if useLazyPages {
+		if usePageServer {
+			logger.Info("Waiting for lazy-pages to connect to page-server", "delay", "5s")
+			time.Sleep(5 * time.Second)
+		}
 
-	// Step 10: Wait for page-server to complete (all pages transferred)
-	// The source pod's page-server must remain alive until it transfers all pages
-	// to the target's lazy-pages daemon. The page-server automatically terminates
-	// when all pages have been sent.
-	// This implements post-copy live migration strategy.
-	logger.Info("Waiting for page-server to complete page transfer", "pageServerPID", dumpResp.PageServerPid)
-	if err := r.waitForPageServerCompletion(ctx, sourceAgent, dumpResp.PageServerPid, 5*time.Minute); err != nil {
-		logger.Error(err, "Page-server did not complete in time (proceeding anyway)")
-		// Non-fatal - continue with source pod deletion
-	} else {
-		logger.Info("Page-server completed successfully")
+		logger.Info("Waiting for lazy-pages to complete on target")
+		if err := r.waitForLazyPagesCompletion(ctx, targetAgent, 5*time.Minute); err != nil {
+			logger.Error(err, "Lazy-pages did not complete in time (proceeding anyway)")
+		} else {
+			logger.Info("Lazy-pages completed, all pages transferred")
+		}
 	}
 
 	// Step 11: Delete source pod
-	logger.Info("Deleting source pod after page-server completion")
+	logger.Info("Deleting source pod")
 	if err := r.Delete(ctx, sourcePod); err != nil {
 		logger.Error(err, "Failed to delete source pod (non-fatal)")
 	}
@@ -295,6 +303,35 @@ func (r *MigratableAppReconciler) waitForPageServerCompletion(
 	}
 
 	return fmt.Errorf("page-server did not complete within %v", timeout)
+}
+
+// waitForLazyPagesCompletion polls target agent until lazy-pages finishes transferring pages
+func (r *MigratableAppReconciler) waitForLazyPagesCompletion(
+	ctx context.Context,
+	targetAgent *AgentClient,
+	timeout time.Duration,
+) error {
+	logger := log.FromContext(ctx)
+	deadline := time.Now().Add(timeout)
+	pollInterval := 2 * time.Second
+
+	for time.Now().Before(deadline) {
+		status, err := targetAgent.GetStatus(ctx)
+		if err != nil {
+			logger.Error(err, "Failed to get target agent status")
+			time.Sleep(pollInterval)
+			continue
+		}
+
+		if !status.LazyPagesActive {
+			return nil
+		}
+
+		logger.V(1).Info("Lazy-pages still active on target, waiting...")
+		time.Sleep(pollInterval)
+	}
+
+	return fmt.Errorf("lazy-pages did not complete within %v", timeout)
 }
 
 // waitForPageServerReady waits for the page-server to be ready to accept connections

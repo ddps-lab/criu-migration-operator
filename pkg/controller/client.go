@@ -50,25 +50,29 @@ func (c *AgentClient) PreCheckpoint(ctx context.Context, parentDumpID string) (*
 }
 
 // FinalDump calls the agent's FinalDump RPC
-func (c *AgentClient) FinalDump(ctx context.Context, pageServerAddr string, pageServerPort int32, parentDumpID string) (*pb.FinalDumpResponse, error) {
+func (c *AgentClient) FinalDump(ctx context.Context, pageServerAddr string, pageServerPort int32, parentDumpID, strategy string) (*pb.FinalDumpResponse, error) {
 	return c.client.FinalDump(ctx, &pb.FinalDumpRequest{
-		PageServerAddr: pageServerAddr,
-		PageServerPort: pageServerPort,
-		ParentDumpId:   parentDumpID,
-		LeaveRunning:   false,
+		PageServerAddr:    pageServerAddr,
+		PageServerPort:    pageServerPort,
+		ParentDumpId:      parentDumpID,
+		LeaveRunning:      false,
+		MigrationStrategy: strategy,
 	})
 }
 
 // Restore calls the agent's Restore RPC
-func (c *AgentClient) Restore(ctx context.Context, dumpID, s3Bucket, s3Prefix, sourceAddr string, externalMounts map[string]string) (*pb.RestoreResponse, error) {
+func (c *AgentClient) Restore(ctx context.Context, dumpID, s3Bucket, s3Prefix, sourceAddr string, externalMounts map[string]string, strategy string, pipeInodes map[string]string) (*pb.RestoreResponse, error) {
+	useLazyPages := strategy == "lazy-storage" || strategy == "lazy-direct" || strategy == "lazy-hybrid"
 	return c.client.Restore(ctx, &pb.RestoreRequest{
-		DumpId:         dumpID,
-		S3Bucket:       s3Bucket,
-		S3Prefix:       s3Prefix,
-		UseLazyPages:   true,
-		PageServerPort: 9999,
-		SourceAddr:     sourceAddr,     // Source pod IP for lazy-pages connection
-		ExternalMounts: externalMounts, // External mounts from dump
+		DumpId:            dumpID,
+		S3Bucket:          s3Bucket,
+		S3Prefix:          s3Prefix,
+		UseLazyPages:      useLazyPages,
+		PageServerPort:    9999,
+		SourceAddr:        sourceAddr,
+		ExternalMounts:    externalMounts,
+		MigrationStrategy: strategy,
+		PipeInodes:        pipeInodes,
 	})
 }
 

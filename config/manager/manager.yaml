@@ -29,11 +29,11 @@ spec:
         effect: "NoSchedule"
       containers:
       - name: controller
-        image: 166.104.75.152:5000/criu-migration-controller:latest
+        image: REGISTRY/CONTROLLER_IMAGE
         imagePullPolicy: Always
         env:
         - name: AGENT_IMAGE
-          value: "166.104.75.152:5000/criu-agent:latest"
+          value: "REGISTRY/AGENT_IMAGE"
         args:
         - --leader-elect
         - --metrics-bind-address=:8080
@@ -101,7 +101,7 @@ spec:
         tolerationSeconds: 300
       containers:
       - name: monitor
-        image: 166.104.75.152:5000/criu-node-monitor:latest
+        image: REGISTRY/MONITOR_IMAGE
         imagePullPolicy: Always
         env:
         - name: NODE_NAME

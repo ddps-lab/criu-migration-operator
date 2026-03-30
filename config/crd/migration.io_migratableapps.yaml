@@ -67,10 +67,43 @@ spec:
                   preferOnDemand:
                     default: true
                     type: boolean
+                  strategy:
+                    default: lazy-storage
+                    type: string
                   targetNodeSelector:
                     additionalProperties:
                       type: string
                     type: object
+                type: object
+              spotInterruptionHandling:
+                properties:
+                  detectionMethods:
+                    items:
+                      properties:
+                        cloudType:
+                          enum:
+                          - aws
+                          - gcp
+                          - azure
+                          - ""
+                          type: string
+                        enabled:
+                          default: true
+                          type: boolean
+                        pollIntervalSeconds:
+                          default: 5
+                          type: integer
+                        type:
+                          enum:
+                          - imds
+                          type: string
+                      required:
+                      - type
+                      type: object
+                    type: array
+                  enabled:
+                    default: true
+                    type: boolean
                 type: object
               storage:
                 properties:

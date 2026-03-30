@@ -7,10 +7,12 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/ddps-lab/criu-migration-operator/pkg/profiler"
 	pb "github.com/ddps-lab/criu-migration-operator/pkg/proto"
 	"google.golang.org/grpc"
 )
@@ -40,7 +42,13 @@ type Agent struct {
 	restoreCmd          *exec.Cmd // Running criu restore process
 	restoreCtx          context.Context
 	restoreCancel       context.CancelFunc
-	restoreDumpID       string // Which dump is being restored
+	restoreDumpID       string   // Which dump is being restored
+	restorePidNsFd      *os.File // PID namespace fd — must stay open for restored process lifetime
+	lazyPagesActive     bool     // true while lazy-pages is still transferring pages
+
+	// Write profiler
+	profilerInst   *profiler.Profiler       // nil when not profiling
+	prevExcludeSet map[uint64]uint64        // previous pre-dump's exclude ranges (start→end)
 }
 
 // NewAgent creates a new CRIU agent
@@ -48,9 +56,10 @@ func NewAgent(workDir, s3Bucket, s3Endpoint, s3Region, mode, podName, nodeName s
 	// Read additional S3 options from environment
 	downloadEndpoint := os.Getenv("DOWNLOAD_ENDPOINT")
 	expressOneZone := os.Getenv("EXPRESS_ONE_ZONE") == "true"
+	storageType := os.Getenv("STORAGE_TYPE")
 
 	// Create S3 client with advanced options
-	s3Client, err := NewS3ClientWithOptions(s3Bucket, s3Endpoint, downloadEndpoint, s3Region, expressOneZone)
+	s3Client, err := NewS3ClientWithOptions(s3Bucket, s3Endpoint, downloadEndpoint, s3Region, storageType, expressOneZone)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create S3 client: %w", err)
 	}
@@ -119,6 +128,13 @@ func (a *Agent) Start(ctx context.Context, port int) error {
 func (a *Agent) PreCheckpoint(ctx context.Context, req *pb.PreCheckpointRequest) (*pb.PreCheckpointResponse, error) {
 	log.Printf("Received PreCheckpoint request (parent: %s)", req.ParentDumpId)
 
+	// Block pre-dump while lazy-pages is still transferring pages.
+	// CRIU pre-dump freezes the process, which prevents lazy-pages from delivering
+	// page faults, causing a deadlock.
+	if a.lazyPagesActive {
+		return nil, fmt.Errorf("pre-checkpoint blocked: lazy-pages is still transferring pages")
+	}
+
 	// Find main process PID if not already set
 	if a.mainPID == 0 {
 		pid, err := a.checkpointMgr.FindMainProcessPID()
@@ -129,10 +145,48 @@ func (a *Agent) PreCheckpoint(ctx context.Context, req *pb.PreCheckpointRequest)
 		log.Printf("Found main process PID: %d", pid)
 	}
 
+	// Build exclude args from profiler if active
+	var excludeArgs *CRIUExcludeArgs
+	if a.profilerInst != nil {
+		a.profilerInst.CleanupBeforeCRIU()
+
+		currentHot := a.profilerInst.GetHotRegions()
+		excludeArgs = &CRIUExcludeArgs{}
+		currentSet := make(map[uint64]uint64, len(currentHot))
+
+		for _, r := range currentHot {
+			excludeArgs.ExcludeRanges = append(excludeArgs.ExcludeRanges,
+				profiler.AddrRange{Start: r.StartAddr, End: r.EndAddr})
+			currentSet[r.StartAddr] = r.EndAddr
+		}
+
+		// Detect hot→cold transitions
+		for start, end := range a.prevExcludeSet {
+			if _, exists := currentSet[start]; !exists {
+				excludeArgs.NoParentRanges = append(excludeArgs.NoParentRanges,
+					profiler.AddrRange{Start: start, End: end})
+			}
+		}
+
+		a.prevExcludeSet = currentSet
+		log.Printf("Profiler: %d exclude ranges, %d no-parent ranges",
+			len(excludeArgs.ExcludeRanges), len(excludeArgs.NoParentRanges))
+	}
+
 	// Perform pre-checkpoint
-	result, err := a.checkpointMgr.PreCheckpoint(ctx, a.mainPID, req.ParentDumpId)
+	result, err := a.checkpointMgr.PreCheckpoint(ctx, a.mainPID, req.ParentDumpId, excludeArgs)
 	if err != nil {
+		if a.profilerInst != nil {
+			a.profilerInst.ReinitAfterCRIU()
+		}
 		return nil, fmt.Errorf("pre-checkpoint failed: %w", err)
+	}
+
+	// Reinit profiler after CRIU dump
+	if a.profilerInst != nil {
+		if err := a.profilerInst.ReinitAfterCRIU(); err != nil {
+			log.Printf("Warning: profiler reinit failed: %v", err)
+		}
 	}
 
 	log.Printf("Pre-checkpoint completed: %s (size: %d bytes, pages: %d)",
@@ -150,6 +204,10 @@ func (a *Agent) PreCheckpoint(ctx context.Context, req *pb.PreCheckpointRequest)
 func (a *Agent) FinalDump(ctx context.Context, req *pb.FinalDumpRequest) (*pb.FinalDumpResponse, error) {
 	log.Printf("Received FinalDump request (page-server: %s:%d, parent: %s)",
 		req.PageServerAddr, req.PageServerPort, req.ParentDumpId)
+
+	if a.lazyPagesActive {
+		return nil, fmt.Errorf("final dump blocked: lazy-pages is still transferring pages")
+	}
 
 	// Find main process PID if not already set
 	if a.mainPID == 0 {
@@ -176,6 +234,30 @@ func (a *Agent) FinalDump(ctx context.Context, req *pb.FinalDumpRequest) (*pb.Fi
 	a.pageServerCtx = pageServerCtx
 	a.pageServerCancel = pageServerCancel
 
+	// Build exclude args from profiler if active
+	var excludeArgs *CRIUExcludeArgs
+	if a.profilerInst != nil {
+		currentHot := a.profilerInst.GetHotRegions()
+		a.profilerInst.CleanupBeforeCRIU()
+
+		// Final dump: --exclude-range only (triggers has_parent=false for full dump)
+		// No --no-parent-range needed (final dump dumps everything)
+		excludeArgs = &CRIUExcludeArgs{}
+		for _, r := range currentHot {
+			excludeArgs.ExcludeRanges = append(excludeArgs.ExcludeRanges,
+				profiler.AddrRange{Start: r.StartAddr, End: r.EndAddr})
+		}
+		log.Printf("Profiler: %d exclude ranges for final dump", len(excludeArgs.ExcludeRanges))
+		// No reinit needed - process will be frozen after final dump
+	}
+
+	// Determine migration strategy
+	strategy := req.MigrationStrategy
+	if strategy == "" {
+		strategy = "lazy-hybrid" // default for backward compatibility
+	}
+	log.Printf("FinalDump with strategy: %s", strategy)
+
 	// Perform final dump with long-lived context
 	result, cmd, err := a.checkpointMgr.FinalDump(
 		pageServerCtx,
@@ -183,6 +265,8 @@ func (a *Agent) FinalDump(ctx context.Context, req *pb.FinalDumpRequest) (*pb.Fi
 		req.PageServerAddr,
 		int(req.PageServerPort),
 		req.ParentDumpId,
+		excludeArgs,
+		strategy,
 	)
 	if err != nil {
 		pageServerCancel()
@@ -192,6 +276,14 @@ func (a *Agent) FinalDump(ctx context.Context, req *pb.FinalDumpRequest) (*pb.Fi
 	// Store page-server process in Agent to keep it alive
 	a.pageServerCmd = cmd
 	a.pageServerDumpID = result.DumpID
+
+	// Reap the page-server process in background to prevent zombie
+	go func() {
+		if cmd != nil && cmd.Process != nil {
+			cmd.Wait()
+			log.Printf("[SOURCE-AGENT] Page-server process (PID %d) has exited", result.PageServerPID)
+		}
+	}()
 
 	log.Printf("[%s] [SOURCE-AGENT] ✓ FinalDump completed - Page-server started",
 		time.Now().Format("15:04:05.000"))
@@ -211,8 +303,9 @@ func (a *Agent) FinalDump(ctx context.Context, req *pb.FinalDumpRequest) (*pb.Fi
 		DumpId:            result.DumpID,
 		Timestamp:         result.Timestamp.Unix(),
 		MetadataSizeBytes: result.SizeBytes,
-		ExternalMounts:    result.ExternalMounts, // Pass external mounts to controller
+		ExternalMounts:    result.ExternalMounts,
 		PageServerPid:     int32(result.PageServerPID),
+		PipeInodes:        result.PipeInodes,
 	}, nil
 }
 
@@ -230,6 +323,10 @@ func (a *Agent) Restore(ctx context.Context, req *pb.RestoreRequest) (*pb.Restor
 		log.Printf("Killing previous restore process (PID %d)", a.restoreCmd.Process.Pid)
 		a.restoreCmd.Process.Kill()
 	}
+	if a.restorePidNsFd != nil {
+		a.restorePidNsFd.Close()
+		a.restorePidNsFd = nil
+	}
 	if a.restoreCancel != nil {
 		a.restoreCancel()
 	}
@@ -240,6 +337,17 @@ func (a *Agent) Restore(ctx context.Context, req *pb.RestoreRequest) (*pb.Restor
 	a.restoreCtx = restoreCtx
 	a.restoreCancel = restoreCancel
 
+	// Determine migration strategy
+	restoreStrategy := req.MigrationStrategy
+	if restoreStrategy == "" {
+		if req.UseLazyPages {
+			restoreStrategy = "lazy-hybrid"
+		} else {
+			restoreStrategy = "full"
+		}
+	}
+	log.Printf("Restore with strategy: %s", restoreStrategy)
+
 	// Perform restore with long-lived context
 	result, lazyPagesCmd, restoreCmd, err := a.restoreMgr.Restore(
 		restoreCtx,
@@ -247,52 +355,83 @@ func (a *Agent) Restore(ctx context.Context, req *pb.RestoreRequest) (*pb.Restor
 		req.S3Prefix,
 		req.UseLazyPages,
 		int(req.PageServerPort),
-		req.SourceAddr,     // Source pod IP for lazy-pages connection
-		req.ExternalMounts, // External mounts from dump
+		req.SourceAddr,
+		req.ExternalMounts,
+		restoreStrategy,
+		req.PipeInodes,
 	)
 	if err != nil {
 		restoreCancel()
 		return nil, fmt.Errorf("restore failed: %w", err)
 	}
 
-	// Store restore processes in Agent to keep them alive
+	// Store restore processes and PID namespace fd in Agent to keep them alive.
+	// The PID namespace fd MUST stay open for the lifetime of the restored process.
 	a.restoreLazyPagesCmd = lazyPagesCmd
 	a.restoreCmd = restoreCmd
 	a.restoreDumpID = req.DumpId
+	a.restorePidNsFd = result.PidNsFd
 
-	log.Printf("[%s] [TARGET-AGENT] ✓ Restore initiated successfully",
-		time.Now().Format("15:04:05.000"))
-	log.Printf("[%s] [TARGET-AGENT] Dump ID: %s",
-		time.Now().Format("15:04:05.000"), req.DumpId)
-	log.Printf("[%s] [TARGET-AGENT] Source page-server: %s:%d",
-		time.Now().Format("15:04:05.000"), req.SourceAddr, req.PageServerPort)
-	log.Printf("[%s] [TARGET-AGENT] Lazy-pages daemon PID: %d",
-		time.Now().Format("15:04:05.000"), lazyPagesCmd.Process.Pid)
-	log.Printf("[%s] [TARGET-AGENT] Restore process PID: %d",
-		time.Now().Format("15:04:05.000"), restoreCmd.Process.Pid)
-	log.Printf("[%s] [TARGET-AGENT] Both processes will remain alive in background",
-		time.Now().Format("15:04:05.000"))
-
-	// Find restored process PID
-	time.Sleep(500 * time.Millisecond)
-	pid, err := a.checkpointMgr.FindMainProcessPID()
-	if err != nil {
-		log.Printf("Warning: could not find restored process PID: %v", err)
-	} else {
-		a.mainPID = pid
-		result.NewPID = int32(pid)
-		log.Printf("Restored process PID: %d", pid)
+	needsLazy := restoreStrategy != "full"
+	if needsLazy {
+		a.lazyPagesActive = true
 	}
 
-	// Create baseline checkpoint for new chain
-	if pid > 0 {
+	// Reap the CRIU restore process and clean up PID namespace fd after it exits.
+	go func() {
+		if restoreCmd != nil && restoreCmd.Process != nil {
+			restoreCmd.Wait()
+			log.Printf("[TARGET-AGENT] CRIU restore process exited")
+		}
+		if a.restorePidNsFd != nil {
+			a.restorePidNsFd.Close()
+			a.restorePidNsFd = nil
+			log.Printf("[TARGET-AGENT] PID namespace fd closed")
+		}
+	}()
+
+	log.Printf("[%s] [TARGET-AGENT] ✓ Restore initiated successfully (strategy: %s)",
+		time.Now().Format("15:04:05.000"), restoreStrategy)
+	log.Printf("[%s] [TARGET-AGENT] Dump ID: %s",
+		time.Now().Format("15:04:05.000"), req.DumpId)
+	if lazyPagesCmd != nil && lazyPagesCmd.Process != nil {
+		log.Printf("[%s] [TARGET-AGENT] Lazy-pages daemon PID: %d",
+			time.Now().Format("15:04:05.000"), lazyPagesCmd.Process.Pid)
+	}
+	if restoreCmd != nil && restoreCmd.Process != nil {
+		log.Printf("[%s] [TARGET-AGENT] Restore process PID: %d",
+			time.Now().Format("15:04:05.000"), restoreCmd.Process.Pid)
+	}
+
+	// Set restored process PID: prefer pidfile (set by RestoreManager), fallback to pgrep
+	var pid int
+	if result.NewPID > 0 {
+		pid = int(result.NewPID)
+		a.mainPID = pid
+		a.checkpointMgr.SetMainPID(pid)
+		log.Printf("Restored process PID (from pidfile): %d", pid)
+	} else {
+		// Fallback: search by process name
+		time.Sleep(500 * time.Millisecond)
+		foundPID, err := a.checkpointMgr.FindMainProcessPID()
+		if err != nil {
+			log.Printf("Warning: could not find restored process PID: %v", err)
+		} else {
+			pid = foundPID
+			a.mainPID = pid
+			result.NewPID = int32(pid)
+			log.Printf("Restored process PID (from fallback): %d", pid)
+		}
+	}
+
+	// Wait for lazy-pages completion in background, then allow checkpoints again
+	if needsLazy {
 		go func() {
-			ctx := context.Background()
-			if err := a.restoreMgr.CreateBaselineCheckpoint(ctx, pid, a.checkpointMgr); err != nil {
-				log.Printf("Warning: failed to create baseline checkpoint: %v", err)
-			} else {
-				log.Printf("Baseline checkpoint created successfully")
+			if lazyPagesCmd != nil && lazyPagesCmd.Process != nil {
+				lazyPagesCmd.Wait()
 			}
+			a.lazyPagesActive = false
+			log.Printf("[TARGET-AGENT] Lazy-pages completed, checkpoints are now allowed")
 		}()
 	}
 
@@ -324,6 +463,7 @@ func (a *Agent) GetStatus(ctx context.Context, req *pb.StatusRequest) (*pb.Statu
 		NodeName:             a.nodeName,
 		PodName:              a.podName,
 		UptimeSeconds:        int64(uptime),
+		LazyPagesActive:      a.lazyPagesActive,
 	}, nil
 }
 
@@ -372,14 +512,25 @@ func (a *Agent) CheckPageServerStatus(ctx context.Context, req *pb.PageServerSta
 	}
 
 	cmdline := string(cmdlineData)
-	if !strings.Contains(cmdline, "criu") || !strings.Contains(cmdline, "dump") {
-		// Not the CRIU dump process we're looking for
-		log.Printf("[%s] [SOURCE-AGENT] PID %d is not page-server (cmdline: %s)",
+	// In page-server mode, CRIU may fork and the cmdline could contain "dump" or "page-server"
+	// Also check for empty cmdline which indicates a zombie process
+	if cmdline == "" {
+		log.Printf("[%s] [SOURCE-AGENT] PID %d has empty cmdline (zombie/terminated)",
+			time.Now().Format("15:04:05.000"), pid)
+		return &pb.PageServerStatusResponse{
+			IsAlive:       false,
+			ExitCode:      0,
+			StatusMessage: fmt.Sprintf("Page-server process %d has terminated (zombie)", pid),
+		}, nil
+	}
+	if !strings.Contains(cmdline, "criu") {
+		// Not the CRIU process we're looking for
+		log.Printf("[%s] [SOURCE-AGENT] PID %d is not a CRIU process (cmdline: %s)",
 			time.Now().Format("15:04:05.000"), pid, cmdline)
 		return &pb.PageServerStatusResponse{
 			IsAlive:       false,
 			ExitCode:      0,
-			StatusMessage: fmt.Sprintf("Process %d is not a CRIU dump/page-server process", pid),
+			StatusMessage: fmt.Sprintf("Process %d is not a CRIU process", pid),
 		}, nil
 	}
 
@@ -390,6 +541,122 @@ func (a *Agent) CheckPageServerStatus(ctx context.Context, req *pb.PageServerSta
 		IsAlive:       true,
 		ExitCode:      0,
 		StatusMessage: fmt.Sprintf("Page-server process %d is still running", pid),
+	}, nil
+}
+
+// StartProfiling implements the gRPC StartProfiling method
+func (a *Agent) StartProfiling(ctx context.Context, req *pb.StartProfilingRequest) (*pb.StartProfilingResponse, error) {
+	log.Printf("Received StartProfiling request (interval=%dms, threshold=%.2f, consecutive=%d)",
+		req.IntervalMs, req.HotThreshold, req.HotConsecutive)
+
+	if a.profilerInst != nil {
+		return &pb.StartProfilingResponse{
+			Success: false,
+			Error:   "profiler already running",
+		}, nil
+	}
+
+	// Find main process PID if not already set
+	if a.mainPID == 0 {
+		pid, err := a.checkpointMgr.FindMainProcessPID()
+		if err != nil {
+			return &pb.StartProfilingResponse{
+				Success: false,
+				Error:   fmt.Sprintf("failed to find main process: %v", err),
+			}, nil
+		}
+		a.mainPID = pid
+	}
+
+	cfg := profiler.DefaultConfig()
+	if req.IntervalMs > 0 {
+		cfg.IntervalMs = int(req.IntervalMs)
+	}
+	if req.HotThreshold > 0 {
+		cfg.HotThreshold = req.HotThreshold
+	}
+	if req.HotConsecutive > 0 {
+		cfg.HotConsecutive = int(req.HotConsecutive)
+	}
+
+	p := profiler.New(a.mainPID, cfg)
+	if err := p.Start(); err != nil {
+		return &pb.StartProfilingResponse{
+			Success: false,
+			Error:   fmt.Sprintf("failed to start profiler: %v", err),
+		}, nil
+	}
+
+	a.profilerInst = p
+	totalVMAs, _ := p.GetVMACounts()
+
+	log.Printf("Profiler started (pid=%d, vmas=%d)", a.mainPID, totalVMAs)
+
+	return &pb.StartProfilingResponse{
+		Success:  true,
+		Pid:      int32(a.mainPID),
+		VmaCount: int32(totalVMAs),
+	}, nil
+}
+
+// StopProfiling implements the gRPC StopProfiling method
+func (a *Agent) StopProfiling(ctx context.Context, req *pb.StopProfilingRequest) (*pb.StopProfilingResponse, error) {
+	log.Printf("Received StopProfiling request")
+
+	if a.profilerInst == nil {
+		return &pb.StopProfilingResponse{Success: true}, nil
+	}
+
+	a.profilerInst.Close()
+	a.profilerInst = nil
+	a.prevExcludeSet = nil
+
+	log.Printf("Profiler stopped")
+	return &pb.StopProfilingResponse{Success: true}, nil
+}
+
+// GetHotRegions implements the gRPC GetHotRegions method
+func (a *Agent) GetHotRegions(ctx context.Context, req *pb.GetHotRegionsRequest) (*pb.GetHotRegionsResponse, error) {
+	if a.profilerInst == nil {
+		return &pb.GetHotRegionsResponse{}, nil
+	}
+
+	regions := a.profilerInst.GetHotRegions()
+	totalVMAs, hotVMAs := a.profilerInst.GetVMACounts()
+
+	protoRegions := make([]*pb.HotRegionProto, len(regions))
+	for i, r := range regions {
+		protoRegions[i] = &pb.HotRegionProto{
+			StartAddr:      r.StartAddr,
+			EndAddr:        r.EndAddr,
+			WrittenRatio:   r.WrittenRatio,
+			ConsecutiveHot: int32(r.ConsecutiveHot),
+		}
+	}
+
+	return &pb.GetHotRegionsResponse{
+		Regions:     protoRegions,
+		TimestampMs: time.Now().UnixMilli(),
+		TotalVmas:   int32(totalVMAs),
+		HotVmas:     int32(hotVMAs),
+	}, nil
+}
+
+// GetDirtyVolume implements the gRPC GetDirtyVolume method
+func (a *Agent) GetDirtyVolume(ctx context.Context, req *pb.GetDirtyVolumeRequest) (*pb.GetDirtyVolumeResponse, error) {
+	if a.profilerInst == nil {
+		return &pb.GetDirtyVolumeResponse{}, nil
+	}
+
+	dv := a.profilerInst.GetDirtyVolume()
+
+	return &pb.GetDirtyVolumeResponse{
+		DirtyPages:           dv.DirtyPages,
+		DirtyBytes:           dv.DirtyBytes,
+		DirtyRatePagesPerSec: dv.DirtyRatePerSec,
+		CumulativeDirtyBytes: dv.CumulativeDirtyBytes,
+		AvgDirtyRate:         dv.AvgDirtyRate,
+		TimestampMs:          dv.TimestampMs,
 	}, nil
 }
 
@@ -425,7 +692,7 @@ func (a *Agent) performRestoreOnStartup(ctx context.Context) error {
 
 	// Perform restore with lazy pages
 	// For startup restore, use empty external mounts (will use defaults)
-	result, lazyPagesCmd, restoreCmd, err := a.restoreMgr.Restore(restoreCtx, checkpointID, s3Prefix, true, 9999, sourceAddr, nil)
+	result, lazyPagesCmd, restoreCmd, err := a.restoreMgr.Restore(restoreCtx, checkpointID, s3Prefix, true, 9999, sourceAddr, nil, "lazy-hybrid", nil)
 	if err != nil {
 		restoreCancel()
 		return fmt.Errorf("restore failed: %w", err)
@@ -470,9 +737,10 @@ func (a *Agent) startUserProcess() error {
 	// Parse annotations (Downward API format is key="value"\n)
 	annotations := string(annotationsData)
 
-	// Extract original command and args
+	// Extract original command, args, and workdir
 	cmdAnnotation := extractAnnotation(annotations, "migration.io/original-command")
 	argsAnnotation := extractAnnotation(annotations, "migration.io/original-args")
+	workdirAnnotation := extractAnnotation(annotations, "migration.io/original-workdir")
 
 	if cmdAnnotation == "" {
 		log.Printf("No original command found in annotations, skipping user process start")
@@ -508,6 +776,21 @@ func (a *Agent) startUserProcess() error {
 
 	// Build the full command string for the shell
 	fullCmd := ""
+	// Prepend cd to original workdir if specified
+	if workdirAnnotation != "" {
+		if filepath.IsAbs(workdirAnnotation) {
+			fullCmd = fmt.Sprintf("cd '%s' && ", workdirAnnotation)
+		} else {
+			// Relative path: resolve against container's CWD (= image WORKDIR)
+			cwd, err := os.Readlink(fmt.Sprintf("/proc/%d/cwd", mainPID))
+			if err == nil {
+				fullCmd = fmt.Sprintf("cd '%s' && ", filepath.Join(cwd, workdirAnnotation))
+			} else {
+				log.Printf("Warning: relative workdir '%s' but cannot determine container CWD: %v", workdirAnnotation, err)
+				fullCmd = fmt.Sprintf("cd '%s' && ", workdirAnnotation)
+			}
+		}
+	}
 	for i, part := range command {
 		if i > 0 {
 			fullCmd += " "
@@ -532,6 +815,9 @@ func (a *Agent) startUserProcess() error {
 			fullCmd += arg
 		}
 	}
+	// Prepend exec so the outer sh replaces itself with the actual command.
+	// This makes nsenter's direct child the workload process (not sh).
+	fullCmd = "exec " + fullCmd
 	nsenterArgs = append(nsenterArgs, fullCmd)
 
 	log.Printf("Executing command via nsenter: %s", fullCmd)
@@ -557,13 +843,13 @@ func (a *Agent) startUserProcess() error {
 	// Wait a moment for the user process to start in the main container's namespace
 	time.Sleep(500 * time.Millisecond)
 
-	// Find the actual user process PID in the main container's PID namespace
-	// The nsenter command spawns the process in a different namespace, so we need to find
-	// the real PID as seen from our agent's perspective
-	realPID, err := findUserProcessPID(command[0])
+	// Find the actual user process PID by tracing nsenter's child process tree.
+	// With `exec` in the command, nsenter's direct child is the workload process.
+	nsenterPID := userCmd.Process.Pid
+	realPID, err := findChildPID(nsenterPID)
 	if err != nil {
-		log.Printf("Warning: failed to find user process PID: %v", err)
-		// Fall back to finding any non-sleep process
+		log.Printf("Warning: failed to find child of nsenter PID %d: %v", nsenterPID, err)
+		// Fallback: try finding any non-sleep process
 		realPID, err = findNonSleepPID()
 		if err != nil {
 			return fmt.Errorf("failed to find user process: %w", err)
@@ -572,7 +858,8 @@ func (a *Agent) startUserProcess() error {
 
 	// Store the real user process PID
 	a.mainPID = realPID
-	log.Printf("User process found with PID: %d", a.mainPID)
+	a.checkpointMgr.SetMainPID(realPID)
+	log.Printf("User process found with PID: %d (child of nsenter PID %d)", a.mainPID, nsenterPID)
 
 	// Don't wait for the nsenter process - let the user process run independently
 	// CRIU will checkpoint the user process later
@@ -580,19 +867,19 @@ func (a *Agent) startUserProcess() error {
 	return nil
 }
 
-// findUserProcessPID finds the PID of a process by its command name
-func findUserProcessPID(cmdName string) (int, error) {
-	// Use pgrep to find process by name
-	cmd := exec.Command("pgrep", "-n", "-f", cmdName)
+// findChildPID finds a direct child process of the given parent PID.
+// Uses pgrep -P (parent PID based) so no process name hardcoding is needed.
+func findChildPID(parentPID int) (int, error) {
+	cmd := exec.Command("pgrep", "-P", fmt.Sprintf("%d", parentPID))
 	output, err := cmd.Output()
 	if err != nil {
-		return 0, fmt.Errorf("process not found: %w", err)
+		return 0, fmt.Errorf("no child of PID %d: %w", parentPID, err)
 	}
 
-	pidStr := strings.TrimSpace(string(output))
-	pid, err := strconv.Atoi(pidStr)
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	pid, err := strconv.Atoi(lines[0])
 	if err != nil {
-		return 0, fmt.Errorf("failed to parse PID: %w", err)
+		return 0, fmt.Errorf("failed to parse child PID: %w", err)
 	}
 
 	return pid, nil

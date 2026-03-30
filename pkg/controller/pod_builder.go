@@ -210,6 +210,9 @@ func (b *PodBuilder) buildBasePod(generation int, mode string) *corev1.Pod {
 					}
 					pod.Annotations["migration.io/original-args"] = argsStr
 				}
+				if c.WorkingDir != "" {
+					pod.Annotations["migration.io/original-workdir"] = c.WorkingDir
+				}
 
 				// Replace with sleep infinity to keep mount namespace clean
 				c.Command = []string{"sleep", "infinity"}
@@ -320,6 +323,10 @@ func (b *PodBuilder) buildAgentContainer(mode string) corev1.Container {
 		{
 			Name:  "ASYNC_PREFETCH",
 			Value: strconv.FormatBool(b.mapp.Spec.Storage.AsyncPrefetch),
+		},
+		{
+			Name:  "STORAGE_TYPE",
+			Value: b.mapp.Spec.Storage.Type,
 		},
 	}
 

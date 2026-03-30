@@ -46,6 +46,14 @@ type CheckpointPolicy struct {
 
 // MigrationPolicy defines migration behavior
 type MigrationPolicy struct {
+	// Strategy defines the migration data transfer strategy.
+	// - full: dump all pages to storage, download all before restore
+	// - lazy-storage: dump all pages to storage, lazy restore fetches on-demand from storage
+	// - lazy-direct: lazy dump with page-server, lazy restore fetches from source via TCP
+	// - lazy-hybrid: lazy dump with page-server + storage upload, lazy restore with TCP + storage fallback
+	// +kubebuilder:default="lazy-storage"
+	Strategy string `json:"strategy,omitempty"`
+
 	// AutoMigrate enables automatic migration on spot interrupt
 	// +kubebuilder:default=true
 	AutoMigrate bool `json:"autoMigrate,omitempty"`

@@ -159,9 +159,11 @@ type FinalDumpRequest struct {
 	// Parent checkpoint ID
 	ParentDumpId string `protobuf:"bytes,3,opt,name=parent_dump_id,json=parentDumpId,proto3" json:"parent_dump_id,omitempty"`
 	// Whether to leave process running (for testing)
-	LeaveRunning  bool `protobuf:"varint,4,opt,name=leave_running,json=leaveRunning,proto3" json:"leave_running,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	LeaveRunning bool `protobuf:"varint,4,opt,name=leave_running,json=leaveRunning,proto3" json:"leave_running,omitempty"`
+	// Migration strategy: full, lazy-storage, lazy-direct, lazy-hybrid
+	MigrationStrategy string `protobuf:"bytes,5,opt,name=migration_strategy,json=migrationStrategy,proto3" json:"migration_strategy,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *FinalDumpRequest) Reset() {
@@ -222,6 +224,13 @@ func (x *FinalDumpRequest) GetLeaveRunning() bool {
 	return false
 }
 
+func (x *FinalDumpRequest) GetMigrationStrategy() string {
+	if x != nil {
+		return x.MigrationStrategy
+	}
+	return ""
+}
+
 // FinalDumpResponse contains the result of final dump
 type FinalDumpResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -235,6 +244,8 @@ type FinalDumpResponse struct {
 	ExternalMounts map[string]string `protobuf:"bytes,4,rep,name=external_mounts,json=externalMounts,proto3" json:"external_mounts,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	// PID of page-server process (for tracking completion)
 	PageServerPid int32 `protobuf:"varint,5,opt,name=page_server_pid,json=pageServerPid,proto3" json:"page_server_pid,omitempty"`
+	// Pipe inodes from dumped process (label -> inode, e.g., "stdout" -> "232671")
+	PipeInodes    map[string]string `protobuf:"bytes,6,rep,name=pipe_inodes,json=pipeInodes,proto3" json:"pipe_inodes,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -304,6 +315,13 @@ func (x *FinalDumpResponse) GetPageServerPid() int32 {
 	return 0
 }
 
+func (x *FinalDumpResponse) GetPipeInodes() map[string]string {
+	if x != nil {
+		return x.PipeInodes
+	}
+	return nil
+}
+
 // RestoreRequest contains parameters for restore
 type RestoreRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -321,8 +339,12 @@ type RestoreRequest struct {
 	SourceAddr string `protobuf:"bytes,6,opt,name=source_addr,json=sourceAddr,proto3" json:"source_addr,omitempty"`
 	// External mounts to use during restore (mountpoint -> identifier)
 	ExternalMounts map[string]string `protobuf:"bytes,7,rep,name=external_mounts,json=externalMounts,proto3" json:"external_mounts,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Migration strategy: full, lazy-storage, lazy-direct, lazy-hybrid
+	MigrationStrategy string `protobuf:"bytes,8,opt,name=migration_strategy,json=migrationStrategy,proto3" json:"migration_strategy,omitempty"`
+	// Pipe inodes from dump (label -> inode) for --inherit-fd mapping
+	PipeInodes    map[string]string `protobuf:"bytes,9,rep,name=pipe_inodes,json=pipeInodes,proto3" json:"pipe_inodes,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *RestoreRequest) Reset() {
@@ -400,6 +422,20 @@ func (x *RestoreRequest) GetSourceAddr() string {
 func (x *RestoreRequest) GetExternalMounts() map[string]string {
 	if x != nil {
 		return x.ExternalMounts
+	}
+	return nil
+}
+
+func (x *RestoreRequest) GetMigrationStrategy() string {
+	if x != nil {
+		return x.MigrationStrategy
+	}
+	return ""
+}
+
+func (x *RestoreRequest) GetPipeInodes() map[string]string {
+	if x != nil {
+		return x.PipeInodes
 	}
 	return nil
 }
@@ -531,8 +567,10 @@ type StatusResponse struct {
 	PodName string `protobuf:"bytes,6,opt,name=pod_name,json=podName,proto3" json:"pod_name,omitempty"`
 	// Agent uptime in seconds
 	UptimeSeconds int64 `protobuf:"varint,7,opt,name=uptime_seconds,json=uptimeSeconds,proto3" json:"uptime_seconds,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// Whether lazy-pages is still transferring pages (blocks checkpoints)
+	LazyPagesActive bool `protobuf:"varint,8,opt,name=lazy_pages_active,json=lazyPagesActive,proto3" json:"lazy_pages_active,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *StatusResponse) Reset() {
@@ -612,6 +650,13 @@ func (x *StatusResponse) GetUptimeSeconds() int64 {
 		return x.UptimeSeconds
 	}
 	return 0
+}
+
+func (x *StatusResponse) GetLazyPagesActive() bool {
+	if x != nil {
+		return x.LazyPagesActive
+	}
+	return false
 }
 
 // PageServerRequest contains parameters for starting page-server
@@ -852,6 +897,518 @@ func (x *PageServerStatusResponse) GetStatusMessage() string {
 	return ""
 }
 
+// StartProfilingRequest contains parameters for starting memory write profiling
+type StartProfilingRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Scan interval in milliseconds (default: 1000)
+	IntervalMs int32 `protobuf:"varint,1,opt,name=interval_ms,json=intervalMs,proto3" json:"interval_ms,omitempty"`
+	// Written ratio threshold for hot classification (default: 0.3)
+	HotThreshold float64 `protobuf:"fixed64,2,opt,name=hot_threshold,json=hotThreshold,proto3" json:"hot_threshold,omitempty"`
+	// Consecutive hot intervals to mark VMA as hot (default: 3)
+	HotConsecutive int32 `protobuf:"varint,3,opt,name=hot_consecutive,json=hotConsecutive,proto3" json:"hot_consecutive,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *StartProfilingRequest) Reset() {
+	*x = StartProfilingRequest{}
+	mi := &file_pkg_proto_agent_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StartProfilingRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StartProfilingRequest) ProtoMessage() {}
+
+func (x *StartProfilingRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_proto_agent_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StartProfilingRequest.ProtoReflect.Descriptor instead.
+func (*StartProfilingRequest) Descriptor() ([]byte, []int) {
+	return file_pkg_proto_agent_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *StartProfilingRequest) GetIntervalMs() int32 {
+	if x != nil {
+		return x.IntervalMs
+	}
+	return 0
+}
+
+func (x *StartProfilingRequest) GetHotThreshold() float64 {
+	if x != nil {
+		return x.HotThreshold
+	}
+	return 0
+}
+
+func (x *StartProfilingRequest) GetHotConsecutive() int32 {
+	if x != nil {
+		return x.HotConsecutive
+	}
+	return 0
+}
+
+// StartProfilingResponse contains the result of starting profiling
+type StartProfilingResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	Error         string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
+	Pid           int32                  `protobuf:"varint,3,opt,name=pid,proto3" json:"pid,omitempty"`
+	VmaCount      int32                  `protobuf:"varint,4,opt,name=vma_count,json=vmaCount,proto3" json:"vma_count,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StartProfilingResponse) Reset() {
+	*x = StartProfilingResponse{}
+	mi := &file_pkg_proto_agent_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StartProfilingResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StartProfilingResponse) ProtoMessage() {}
+
+func (x *StartProfilingResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_proto_agent_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StartProfilingResponse.ProtoReflect.Descriptor instead.
+func (*StartProfilingResponse) Descriptor() ([]byte, []int) {
+	return file_pkg_proto_agent_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *StartProfilingResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *StartProfilingResponse) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *StartProfilingResponse) GetPid() int32 {
+	if x != nil {
+		return x.Pid
+	}
+	return 0
+}
+
+func (x *StartProfilingResponse) GetVmaCount() int32 {
+	if x != nil {
+		return x.VmaCount
+	}
+	return 0
+}
+
+// StopProfilingRequest is empty
+type StopProfilingRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StopProfilingRequest) Reset() {
+	*x = StopProfilingRequest{}
+	mi := &file_pkg_proto_agent_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StopProfilingRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StopProfilingRequest) ProtoMessage() {}
+
+func (x *StopProfilingRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_proto_agent_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StopProfilingRequest.ProtoReflect.Descriptor instead.
+func (*StopProfilingRequest) Descriptor() ([]byte, []int) {
+	return file_pkg_proto_agent_proto_rawDescGZIP(), []int{14}
+}
+
+// StopProfilingResponse contains the result of stopping profiling
+type StopProfilingResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StopProfilingResponse) Reset() {
+	*x = StopProfilingResponse{}
+	mi := &file_pkg_proto_agent_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StopProfilingResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StopProfilingResponse) ProtoMessage() {}
+
+func (x *StopProfilingResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_proto_agent_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StopProfilingResponse.ProtoReflect.Descriptor instead.
+func (*StopProfilingResponse) Descriptor() ([]byte, []int) {
+	return file_pkg_proto_agent_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *StopProfilingResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+// GetHotRegionsRequest is empty
+type GetHotRegionsRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetHotRegionsRequest) Reset() {
+	*x = GetHotRegionsRequest{}
+	mi := &file_pkg_proto_agent_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetHotRegionsRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetHotRegionsRequest) ProtoMessage() {}
+
+func (x *GetHotRegionsRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_proto_agent_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetHotRegionsRequest.ProtoReflect.Descriptor instead.
+func (*GetHotRegionsRequest) Descriptor() ([]byte, []int) {
+	return file_pkg_proto_agent_proto_rawDescGZIP(), []int{16}
+}
+
+// GetHotRegionsResponse contains the current hot memory regions
+type GetHotRegionsResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Regions       []*HotRegionProto      `protobuf:"bytes,1,rep,name=regions,proto3" json:"regions,omitempty"`
+	TimestampMs   int64                  `protobuf:"varint,2,opt,name=timestamp_ms,json=timestampMs,proto3" json:"timestamp_ms,omitempty"`
+	TotalVmas     int32                  `protobuf:"varint,3,opt,name=total_vmas,json=totalVmas,proto3" json:"total_vmas,omitempty"`
+	HotVmas       int32                  `protobuf:"varint,4,opt,name=hot_vmas,json=hotVmas,proto3" json:"hot_vmas,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetHotRegionsResponse) Reset() {
+	*x = GetHotRegionsResponse{}
+	mi := &file_pkg_proto_agent_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetHotRegionsResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetHotRegionsResponse) ProtoMessage() {}
+
+func (x *GetHotRegionsResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_proto_agent_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetHotRegionsResponse.ProtoReflect.Descriptor instead.
+func (*GetHotRegionsResponse) Descriptor() ([]byte, []int) {
+	return file_pkg_proto_agent_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *GetHotRegionsResponse) GetRegions() []*HotRegionProto {
+	if x != nil {
+		return x.Regions
+	}
+	return nil
+}
+
+func (x *GetHotRegionsResponse) GetTimestampMs() int64 {
+	if x != nil {
+		return x.TimestampMs
+	}
+	return 0
+}
+
+func (x *GetHotRegionsResponse) GetTotalVmas() int32 {
+	if x != nil {
+		return x.TotalVmas
+	}
+	return 0
+}
+
+func (x *GetHotRegionsResponse) GetHotVmas() int32 {
+	if x != nil {
+		return x.HotVmas
+	}
+	return 0
+}
+
+// HotRegionProto represents a hot memory region
+type HotRegionProto struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	StartAddr      uint64                 `protobuf:"varint,1,opt,name=start_addr,json=startAddr,proto3" json:"start_addr,omitempty"`
+	EndAddr        uint64                 `protobuf:"varint,2,opt,name=end_addr,json=endAddr,proto3" json:"end_addr,omitempty"`
+	WrittenRatio   float64                `protobuf:"fixed64,3,opt,name=written_ratio,json=writtenRatio,proto3" json:"written_ratio,omitempty"`
+	ConsecutiveHot int32                  `protobuf:"varint,4,opt,name=consecutive_hot,json=consecutiveHot,proto3" json:"consecutive_hot,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *HotRegionProto) Reset() {
+	*x = HotRegionProto{}
+	mi := &file_pkg_proto_agent_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HotRegionProto) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HotRegionProto) ProtoMessage() {}
+
+func (x *HotRegionProto) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_proto_agent_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HotRegionProto.ProtoReflect.Descriptor instead.
+func (*HotRegionProto) Descriptor() ([]byte, []int) {
+	return file_pkg_proto_agent_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *HotRegionProto) GetStartAddr() uint64 {
+	if x != nil {
+		return x.StartAddr
+	}
+	return 0
+}
+
+func (x *HotRegionProto) GetEndAddr() uint64 {
+	if x != nil {
+		return x.EndAddr
+	}
+	return 0
+}
+
+func (x *HotRegionProto) GetWrittenRatio() float64 {
+	if x != nil {
+		return x.WrittenRatio
+	}
+	return 0
+}
+
+func (x *HotRegionProto) GetConsecutiveHot() int32 {
+	if x != nil {
+		return x.ConsecutiveHot
+	}
+	return 0
+}
+
+// GetDirtyVolumeRequest is empty
+type GetDirtyVolumeRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetDirtyVolumeRequest) Reset() {
+	*x = GetDirtyVolumeRequest{}
+	mi := &file_pkg_proto_agent_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetDirtyVolumeRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetDirtyVolumeRequest) ProtoMessage() {}
+
+func (x *GetDirtyVolumeRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_proto_agent_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetDirtyVolumeRequest.ProtoReflect.Descriptor instead.
+func (*GetDirtyVolumeRequest) Descriptor() ([]byte, []int) {
+	return file_pkg_proto_agent_proto_rawDescGZIP(), []int{19}
+}
+
+// GetDirtyVolumeResponse contains current dirty page statistics
+type GetDirtyVolumeResponse struct {
+	state                protoimpl.MessageState `protogen:"open.v1"`
+	DirtyPages           int64                  `protobuf:"varint,1,opt,name=dirty_pages,json=dirtyPages,proto3" json:"dirty_pages,omitempty"`
+	DirtyBytes           int64                  `protobuf:"varint,2,opt,name=dirty_bytes,json=dirtyBytes,proto3" json:"dirty_bytes,omitempty"`
+	DirtyRatePagesPerSec float64                `protobuf:"fixed64,3,opt,name=dirty_rate_pages_per_sec,json=dirtyRatePagesPerSec,proto3" json:"dirty_rate_pages_per_sec,omitempty"`
+	CumulativeDirtyBytes int64                  `protobuf:"varint,4,opt,name=cumulative_dirty_bytes,json=cumulativeDirtyBytes,proto3" json:"cumulative_dirty_bytes,omitempty"`
+	AvgDirtyRate         float64                `protobuf:"fixed64,5,opt,name=avg_dirty_rate,json=avgDirtyRate,proto3" json:"avg_dirty_rate,omitempty"`
+	TimestampMs          int64                  `protobuf:"varint,6,opt,name=timestamp_ms,json=timestampMs,proto3" json:"timestamp_ms,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
+}
+
+func (x *GetDirtyVolumeResponse) Reset() {
+	*x = GetDirtyVolumeResponse{}
+	mi := &file_pkg_proto_agent_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetDirtyVolumeResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetDirtyVolumeResponse) ProtoMessage() {}
+
+func (x *GetDirtyVolumeResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_proto_agent_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetDirtyVolumeResponse.ProtoReflect.Descriptor instead.
+func (*GetDirtyVolumeResponse) Descriptor() ([]byte, []int) {
+	return file_pkg_proto_agent_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *GetDirtyVolumeResponse) GetDirtyPages() int64 {
+	if x != nil {
+		return x.DirtyPages
+	}
+	return 0
+}
+
+func (x *GetDirtyVolumeResponse) GetDirtyBytes() int64 {
+	if x != nil {
+		return x.DirtyBytes
+	}
+	return 0
+}
+
+func (x *GetDirtyVolumeResponse) GetDirtyRatePagesPerSec() float64 {
+	if x != nil {
+		return x.DirtyRatePagesPerSec
+	}
+	return 0
+}
+
+func (x *GetDirtyVolumeResponse) GetCumulativeDirtyBytes() int64 {
+	if x != nil {
+		return x.CumulativeDirtyBytes
+	}
+	return 0
+}
+
+func (x *GetDirtyVolumeResponse) GetAvgDirtyRate() float64 {
+	if x != nil {
+		return x.AvgDirtyRate
+	}
+	return 0
+}
+
+func (x *GetDirtyVolumeResponse) GetTimestampMs() int64 {
+	if x != nil {
+		return x.TimestampMs
+	}
+	return 0
+}
+
 var File_pkg_proto_agent_proto protoreflect.FileDescriptor
 
 const file_pkg_proto_agent_proto_rawDesc = "" +
@@ -866,21 +1423,27 @@ const file_pkg_proto_agent_proto_rawDesc = "" +
 	"\ttimestamp\x18\x02 \x01(\x03R\ttimestamp\x12\x1d\n" +
 	"\n" +
 	"size_bytes\x18\x03 \x01(\x03R\tsizeBytes\x12!\n" +
-	"\fpages_dumped\x18\x04 \x01(\x03R\vpagesDumped\"\xb1\x01\n" +
+	"\fpages_dumped\x18\x04 \x01(\x03R\vpagesDumped\"\xe0\x01\n" +
 	"\x10FinalDumpRequest\x12(\n" +
 	"\x10page_server_addr\x18\x01 \x01(\tR\x0epageServerAddr\x12(\n" +
 	"\x10page_server_port\x18\x02 \x01(\x05R\x0epageServerPort\x12$\n" +
 	"\x0eparent_dump_id\x18\x03 \x01(\tR\fparentDumpId\x12#\n" +
-	"\rleave_running\x18\x04 \x01(\bR\fleaveRunning\"\xbc\x02\n" +
+	"\rleave_running\x18\x04 \x01(\bR\fleaveRunning\x12-\n" +
+	"\x12migration_strategy\x18\x05 \x01(\tR\x11migrationStrategy\"\xc6\x03\n" +
 	"\x11FinalDumpResponse\x12\x17\n" +
 	"\adump_id\x18\x01 \x01(\tR\x06dumpId\x12\x1c\n" +
 	"\ttimestamp\x18\x02 \x01(\x03R\ttimestamp\x12.\n" +
 	"\x13metadata_size_bytes\x18\x03 \x01(\x03R\x11metadataSizeBytes\x12U\n" +
 	"\x0fexternal_mounts\x18\x04 \x03(\v2,.agent.FinalDumpResponse.ExternalMountsEntryR\x0eexternalMounts\x12&\n" +
-	"\x0fpage_server_pid\x18\x05 \x01(\x05R\rpageServerPid\x1aA\n" +
+	"\x0fpage_server_pid\x18\x05 \x01(\x05R\rpageServerPid\x12I\n" +
+	"\vpipe_inodes\x18\x06 \x03(\v2(.agent.FinalDumpResponse.PipeInodesEntryR\n" +
+	"pipeInodes\x1aA\n" +
 	"\x13ExternalMountsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xeb\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a=\n" +
+	"\x0fPipeInodesEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa1\x04\n" +
 	"\x0eRestoreRequest\x12\x17\n" +
 	"\adump_id\x18\x01 \x01(\tR\x06dumpId\x12\x1b\n" +
 	"\ts3_bucket\x18\x02 \x01(\tR\bs3Bucket\x12\x1b\n" +
@@ -889,8 +1452,14 @@ const file_pkg_proto_agent_proto_rawDesc = "" +
 	"\x10page_server_port\x18\x05 \x01(\x05R\x0epageServerPort\x12\x1f\n" +
 	"\vsource_addr\x18\x06 \x01(\tR\n" +
 	"sourceAddr\x12R\n" +
-	"\x0fexternal_mounts\x18\a \x03(\v2).agent.RestoreRequest.ExternalMountsEntryR\x0eexternalMounts\x1aA\n" +
+	"\x0fexternal_mounts\x18\a \x03(\v2).agent.RestoreRequest.ExternalMountsEntryR\x0eexternalMounts\x12-\n" +
+	"\x12migration_strategy\x18\b \x01(\tR\x11migrationStrategy\x12F\n" +
+	"\vpipe_inodes\x18\t \x03(\v2%.agent.RestoreRequest.PipeInodesEntryR\n" +
+	"pipeInodes\x1aA\n" +
 	"\x13ExternalMountsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a=\n" +
+	"\x0fPipeInodesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x83\x01\n" +
 	"\x0fRestoreResponse\x12\x18\n" +
@@ -899,7 +1468,7 @@ const file_pkg_proto_agent_proto_rawDesc = "" +
 	"\ttimestamp\x18\x03 \x01(\x03R\ttimestamp\x12\x1f\n" +
 	"\vduration_ms\x18\x04 \x01(\x03R\n" +
 	"durationMs\"\x0f\n" +
-	"\rStatusRequest\"\x91\x02\n" +
+	"\rStatusRequest\"\xbd\x02\n" +
 	"\x0eStatusResponse\x12\x12\n" +
 	"\x04mode\x18\x01 \x01(\tR\x04mode\x12(\n" +
 	"\x10main_process_pid\x18\x02 \x01(\x05R\x0emainProcessPid\x12,\n" +
@@ -907,7 +1476,8 @@ const file_pkg_proto_agent_proto_rawDesc = "" +
 	"\x16checkpoint_chain_depth\x18\x04 \x01(\x05R\x14checkpointChainDepth\x12\x1b\n" +
 	"\tnode_name\x18\x05 \x01(\tR\bnodeName\x12\x19\n" +
 	"\bpod_name\x18\x06 \x01(\tR\apodName\x12%\n" +
-	"\x0euptime_seconds\x18\a \x01(\x03R\ruptimeSeconds\"f\n" +
+	"\x0euptime_seconds\x18\a \x01(\x03R\ruptimeSeconds\x12*\n" +
+	"\x11lazy_pages_active\x18\b \x01(\bR\x0flazyPagesActive\"f\n" +
 	"\x11PageServerRequest\x12\x12\n" +
 	"\x04port\x18\x01 \x01(\x05R\x04port\x12%\n" +
 	"\x0echeckpoint_dir\x18\x02 \x01(\tR\rcheckpointDir\x12\x16\n" +
@@ -921,14 +1491,54 @@ const file_pkg_proto_agent_proto_rawDesc = "" +
 	"\x18PageServerStatusResponse\x12\x19\n" +
 	"\bis_alive\x18\x01 \x01(\bR\aisAlive\x12\x1b\n" +
 	"\texit_code\x18\x02 \x01(\x05R\bexitCode\x12%\n" +
-	"\x0estatus_message\x18\x03 \x01(\tR\rstatusMessage2\xad\x03\n" +
+	"\x0estatus_message\x18\x03 \x01(\tR\rstatusMessage\"\x86\x01\n" +
+	"\x15StartProfilingRequest\x12\x1f\n" +
+	"\vinterval_ms\x18\x01 \x01(\x05R\n" +
+	"intervalMs\x12#\n" +
+	"\rhot_threshold\x18\x02 \x01(\x01R\fhotThreshold\x12'\n" +
+	"\x0fhot_consecutive\x18\x03 \x01(\x05R\x0ehotConsecutive\"w\n" +
+	"\x16StartProfilingResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x14\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\x12\x10\n" +
+	"\x03pid\x18\x03 \x01(\x05R\x03pid\x12\x1b\n" +
+	"\tvma_count\x18\x04 \x01(\x05R\bvmaCount\"\x16\n" +
+	"\x14StopProfilingRequest\"1\n" +
+	"\x15StopProfilingResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\"\x16\n" +
+	"\x14GetHotRegionsRequest\"\xa5\x01\n" +
+	"\x15GetHotRegionsResponse\x12/\n" +
+	"\aregions\x18\x01 \x03(\v2\x15.agent.HotRegionProtoR\aregions\x12!\n" +
+	"\ftimestamp_ms\x18\x02 \x01(\x03R\vtimestampMs\x12\x1d\n" +
+	"\n" +
+	"total_vmas\x18\x03 \x01(\x05R\ttotalVmas\x12\x19\n" +
+	"\bhot_vmas\x18\x04 \x01(\x05R\ahotVmas\"\x98\x01\n" +
+	"\x0eHotRegionProto\x12\x1d\n" +
+	"\n" +
+	"start_addr\x18\x01 \x01(\x04R\tstartAddr\x12\x19\n" +
+	"\bend_addr\x18\x02 \x01(\x04R\aendAddr\x12#\n" +
+	"\rwritten_ratio\x18\x03 \x01(\x01R\fwrittenRatio\x12'\n" +
+	"\x0fconsecutive_hot\x18\x04 \x01(\x05R\x0econsecutiveHot\"\x17\n" +
+	"\x15GetDirtyVolumeRequest\"\x91\x02\n" +
+	"\x16GetDirtyVolumeResponse\x12\x1f\n" +
+	"\vdirty_pages\x18\x01 \x01(\x03R\n" +
+	"dirtyPages\x12\x1f\n" +
+	"\vdirty_bytes\x18\x02 \x01(\x03R\n" +
+	"dirtyBytes\x126\n" +
+	"\x18dirty_rate_pages_per_sec\x18\x03 \x01(\x01R\x14dirtyRatePagesPerSec\x124\n" +
+	"\x16cumulative_dirty_bytes\x18\x04 \x01(\x03R\x14cumulativeDirtyBytes\x12$\n" +
+	"\x0eavg_dirty_rate\x18\x05 \x01(\x01R\favgDirtyRate\x12!\n" +
+	"\ftimestamp_ms\x18\x06 \x01(\x03R\vtimestampMs2\xe3\x05\n" +
 	"\tCRIUAgent\x12J\n" +
 	"\rPreCheckpoint\x12\x1b.agent.PreCheckpointRequest\x1a\x1c.agent.PreCheckpointResponse\x12>\n" +
 	"\tFinalDump\x12\x17.agent.FinalDumpRequest\x1a\x18.agent.FinalDumpResponse\x128\n" +
 	"\aRestore\x12\x15.agent.RestoreRequest\x1a\x16.agent.RestoreResponse\x128\n" +
 	"\tGetStatus\x12\x14.agent.StatusRequest\x1a\x15.agent.StatusResponse\x12F\n" +
 	"\x0fStartPageServer\x12\x18.agent.PageServerRequest\x1a\x19.agent.PageServerResponse\x12X\n" +
-	"\x15CheckPageServerStatus\x12\x1e.agent.PageServerStatusRequest\x1a\x1f.agent.PageServerStatusResponseB7Z5github.com/ddps-lab/criu-migration-operator/pkg/protob\x06proto3"
+	"\x15CheckPageServerStatus\x12\x1e.agent.PageServerStatusRequest\x1a\x1f.agent.PageServerStatusResponse\x12M\n" +
+	"\x0eStartProfiling\x12\x1c.agent.StartProfilingRequest\x1a\x1d.agent.StartProfilingResponse\x12J\n" +
+	"\rStopProfiling\x12\x1b.agent.StopProfilingRequest\x1a\x1c.agent.StopProfilingResponse\x12J\n" +
+	"\rGetHotRegions\x12\x1b.agent.GetHotRegionsRequest\x1a\x1c.agent.GetHotRegionsResponse\x12M\n" +
+	"\x0eGetDirtyVolume\x12\x1c.agent.GetDirtyVolumeRequest\x1a\x1d.agent.GetDirtyVolumeResponseB7Z5github.com/ddps-lab/criu-migration-operator/pkg/protob\x06proto3"
 
 var (
 	file_pkg_proto_agent_proto_rawDescOnce sync.Once
@@ -942,7 +1552,7 @@ func file_pkg_proto_agent_proto_rawDescGZIP() []byte {
 	return file_pkg_proto_agent_proto_rawDescData
 }
 
-var file_pkg_proto_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
+var file_pkg_proto_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
 var file_pkg_proto_agent_proto_goTypes = []any{
 	(*PreCheckpointRequest)(nil),     // 0: agent.PreCheckpointRequest
 	(*PreCheckpointResponse)(nil),    // 1: agent.PreCheckpointResponse
@@ -956,29 +1566,51 @@ var file_pkg_proto_agent_proto_goTypes = []any{
 	(*PageServerResponse)(nil),       // 9: agent.PageServerResponse
 	(*PageServerStatusRequest)(nil),  // 10: agent.PageServerStatusRequest
 	(*PageServerStatusResponse)(nil), // 11: agent.PageServerStatusResponse
-	nil,                              // 12: agent.FinalDumpResponse.ExternalMountsEntry
-	nil,                              // 13: agent.RestoreRequest.ExternalMountsEntry
+	(*StartProfilingRequest)(nil),    // 12: agent.StartProfilingRequest
+	(*StartProfilingResponse)(nil),   // 13: agent.StartProfilingResponse
+	(*StopProfilingRequest)(nil),     // 14: agent.StopProfilingRequest
+	(*StopProfilingResponse)(nil),    // 15: agent.StopProfilingResponse
+	(*GetHotRegionsRequest)(nil),     // 16: agent.GetHotRegionsRequest
+	(*GetHotRegionsResponse)(nil),    // 17: agent.GetHotRegionsResponse
+	(*HotRegionProto)(nil),           // 18: agent.HotRegionProto
+	(*GetDirtyVolumeRequest)(nil),    // 19: agent.GetDirtyVolumeRequest
+	(*GetDirtyVolumeResponse)(nil),   // 20: agent.GetDirtyVolumeResponse
+	nil,                              // 21: agent.FinalDumpResponse.ExternalMountsEntry
+	nil,                              // 22: agent.FinalDumpResponse.PipeInodesEntry
+	nil,                              // 23: agent.RestoreRequest.ExternalMountsEntry
+	nil,                              // 24: agent.RestoreRequest.PipeInodesEntry
 }
 var file_pkg_proto_agent_proto_depIdxs = []int32{
-	12, // 0: agent.FinalDumpResponse.external_mounts:type_name -> agent.FinalDumpResponse.ExternalMountsEntry
-	13, // 1: agent.RestoreRequest.external_mounts:type_name -> agent.RestoreRequest.ExternalMountsEntry
-	0,  // 2: agent.CRIUAgent.PreCheckpoint:input_type -> agent.PreCheckpointRequest
-	2,  // 3: agent.CRIUAgent.FinalDump:input_type -> agent.FinalDumpRequest
-	4,  // 4: agent.CRIUAgent.Restore:input_type -> agent.RestoreRequest
-	6,  // 5: agent.CRIUAgent.GetStatus:input_type -> agent.StatusRequest
-	8,  // 6: agent.CRIUAgent.StartPageServer:input_type -> agent.PageServerRequest
-	10, // 7: agent.CRIUAgent.CheckPageServerStatus:input_type -> agent.PageServerStatusRequest
-	1,  // 8: agent.CRIUAgent.PreCheckpoint:output_type -> agent.PreCheckpointResponse
-	3,  // 9: agent.CRIUAgent.FinalDump:output_type -> agent.FinalDumpResponse
-	5,  // 10: agent.CRIUAgent.Restore:output_type -> agent.RestoreResponse
-	7,  // 11: agent.CRIUAgent.GetStatus:output_type -> agent.StatusResponse
-	9,  // 12: agent.CRIUAgent.StartPageServer:output_type -> agent.PageServerResponse
-	11, // 13: agent.CRIUAgent.CheckPageServerStatus:output_type -> agent.PageServerStatusResponse
-	8,  // [8:14] is the sub-list for method output_type
-	2,  // [2:8] is the sub-list for method input_type
-	2,  // [2:2] is the sub-list for extension type_name
-	2,  // [2:2] is the sub-list for extension extendee
-	0,  // [0:2] is the sub-list for field type_name
+	21, // 0: agent.FinalDumpResponse.external_mounts:type_name -> agent.FinalDumpResponse.ExternalMountsEntry
+	22, // 1: agent.FinalDumpResponse.pipe_inodes:type_name -> agent.FinalDumpResponse.PipeInodesEntry
+	23, // 2: agent.RestoreRequest.external_mounts:type_name -> agent.RestoreRequest.ExternalMountsEntry
+	24, // 3: agent.RestoreRequest.pipe_inodes:type_name -> agent.RestoreRequest.PipeInodesEntry
+	18, // 4: agent.GetHotRegionsResponse.regions:type_name -> agent.HotRegionProto
+	0,  // 5: agent.CRIUAgent.PreCheckpoint:input_type -> agent.PreCheckpointRequest
+	2,  // 6: agent.CRIUAgent.FinalDump:input_type -> agent.FinalDumpRequest
+	4,  // 7: agent.CRIUAgent.Restore:input_type -> agent.RestoreRequest
+	6,  // 8: agent.CRIUAgent.GetStatus:input_type -> agent.StatusRequest
+	8,  // 9: agent.CRIUAgent.StartPageServer:input_type -> agent.PageServerRequest
+	10, // 10: agent.CRIUAgent.CheckPageServerStatus:input_type -> agent.PageServerStatusRequest
+	12, // 11: agent.CRIUAgent.StartProfiling:input_type -> agent.StartProfilingRequest
+	14, // 12: agent.CRIUAgent.StopProfiling:input_type -> agent.StopProfilingRequest
+	16, // 13: agent.CRIUAgent.GetHotRegions:input_type -> agent.GetHotRegionsRequest
+	19, // 14: agent.CRIUAgent.GetDirtyVolume:input_type -> agent.GetDirtyVolumeRequest
+	1,  // 15: agent.CRIUAgent.PreCheckpoint:output_type -> agent.PreCheckpointResponse
+	3,  // 16: agent.CRIUAgent.FinalDump:output_type -> agent.FinalDumpResponse
+	5,  // 17: agent.CRIUAgent.Restore:output_type -> agent.RestoreResponse
+	7,  // 18: agent.CRIUAgent.GetStatus:output_type -> agent.StatusResponse
+	9,  // 19: agent.CRIUAgent.StartPageServer:output_type -> agent.PageServerResponse
+	11, // 20: agent.CRIUAgent.CheckPageServerStatus:output_type -> agent.PageServerStatusResponse
+	13, // 21: agent.CRIUAgent.StartProfiling:output_type -> agent.StartProfilingResponse
+	15, // 22: agent.CRIUAgent.StopProfiling:output_type -> agent.StopProfilingResponse
+	17, // 23: agent.CRIUAgent.GetHotRegions:output_type -> agent.GetHotRegionsResponse
+	20, // 24: agent.CRIUAgent.GetDirtyVolume:output_type -> agent.GetDirtyVolumeResponse
+	15, // [15:25] is the sub-list for method output_type
+	5,  // [5:15] is the sub-list for method input_type
+	5,  // [5:5] is the sub-list for extension type_name
+	5,  // [5:5] is the sub-list for extension extendee
+	0,  // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_pkg_proto_agent_proto_init() }
@@ -992,7 +1624,7 @@ func file_pkg_proto_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_pkg_proto_agent_proto_rawDesc), len(file_pkg_proto_agent_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   14,
+			NumMessages:   25,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

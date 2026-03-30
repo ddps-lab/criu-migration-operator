@@ -48,11 +48,10 @@ WORKDIR /app
 # Copy binary from builder
 COPY --from=builder /workspace/agent .
 
-# Download CRIU binary (using pre-built from releases)
-RUN curl -fsSL https://github.com/checkpoint-restore/criu/releases/download/v3.18/criu-3.18.linux-amd64 \
-    -o /usr/local/bin/criu && \
-    chmod +x /usr/local/bin/criu || \
-    echo "Warning: CRIU binary download failed, image will still work for basic operations"
+# Copy pre-built CRIU binary (ddps-lab/criu-s3 with S3 streaming support)
+COPY criu-binary /usr/local/sbin/criu
+COPY criu-ns-binary /usr/local/sbin/criu-ns
+RUN chmod +x /usr/local/sbin/criu /usr/local/sbin/criu-ns
 
 # Create working directory for checkpoints
 RUN mkdir -p /tmp/.criu-checkpoints && chmod 755 /tmp/.criu-checkpoints

@@ -1,0 +1,78 @@
+---
+# 1. memwrite: 전체 버퍼를 매 반복마다 write (dense uniform dirty)
+apiVersion: migration.io/v1alpha1
+kind: MigratableApp
+metadata:
+  name: memwrite
+spec:
+  template:
+    metadata:
+      labels:
+        app: memwrite
+    spec:
+      shareProcessNamespace: true
+      containers:
+      - name: app
+        image: 172.16.0.254:5000/criu-workload:latest
+        command: ["sh", "-c"]
+        args: ["mkdir -p /tmp/workload && touch /tmp/workload/checkpoint_flag && exec python3 /workloads/memwrite_standalone.py --buffer-mb 64 --duration 600 --working_dir /tmp/workload"]
+  checkpointPolicy:
+    interval: "600s"
+  storage:
+    type: minio
+    bucket: test-bucket
+    endpoint: "http://minio.migration-system:9000"
+    region: us-east-1
+    credentialsSecret: s3-credentials
+---
+# 2. memory: 점진적 메모리 할당 (growing, sparse write)
+apiVersion: migration.io/v1alpha1
+kind: MigratableApp
+metadata:
+  name: memory-alloc
+spec:
+  template:
+    metadata:
+      labels:
+        app: memory-alloc
+    spec:
+      shareProcessNamespace: true
+      containers:
+      - name: app
+        image: 172.16.0.254:5000/criu-workload:latest
+        command: ["sh", "-c"]
+        args: ["mkdir -p /tmp/workload && touch /tmp/workload/checkpoint_flag && exec python3 /workloads/memory_standalone.py --mb-size 32 --interval 3 --max-memory-mb 512 --working_dir /tmp/workload"]
+  checkpointPolicy:
+    interval: "600s"
+  storage:
+    type: minio
+    bucket: test-bucket
+    endpoint: "http://minio.migration-system:9000"
+    region: us-east-1
+    credentialsSecret: s3-credentials
+---
+# 3. matmul: 행렬은 read-only, 벡터만 hot (sparse hot/cold)
+apiVersion: migration.io/v1alpha1
+kind: MigratableApp
+metadata:
+  name: matmul
+spec:
+  template:
+    metadata:
+      labels:
+        app: matmul
+    spec:
+      shareProcessNamespace: true
+      containers:
+      - name: app
+        image: 172.16.0.254:5000/criu-workload:latest
+        command: ["sh", "-c"]
+        args: ["mkdir -p /tmp/workload && touch /tmp/workload/checkpoint_flag && exec python3 /workloads/matmul_standalone.py --matrix-size 1024 --interval 0.5 --duration 600 --working_dir /tmp/workload"]
+  checkpointPolicy:
+    interval: "600s"
+  storage:
+    type: minio
+    bucket: test-bucket
+    endpoint: "http://minio.migration-system:9000"
+    region: us-east-1
+    credentialsSecret: s3-credentials

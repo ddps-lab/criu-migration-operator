@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -33,14 +34,24 @@ func NewRestoreManager(workDir string, s3Client *S3Client, podName, nodeName str
 // Restore restores a process from a checkpoint
 // Returns: result, lazyPagesCmd, restoreCmd, error
 // The caller MUST store the returned cmds to keep processes alive
-func (m *RestoreManager) Restore(ctx context.Context, dumpID, s3Prefix string, useLazyPages bool, pageServerPort int, sourceAddr string, externalMounts map[string]string) (*RestoreResult, *exec.Cmd, *exec.Cmd, error) {
+func (m *RestoreManager) Restore(ctx context.Context, dumpID, s3Prefix string, useLazyPages bool, pageServerPort int, sourceAddr string, externalMounts map[string]string, strategy string, pipeInodes map[string]string) (*RestoreResult, *exec.Cmd, *exec.Cmd, error) {
 	startTime := time.Now()
 
-	// Download checkpoint chain metadata from S3 (pages come from page-server)
-	// This downloads ALL checkpoints in the chain (all parent dumps' metadata)
-	// to preserve directory structure needed for --prev-images-dir references
-	if err := m.s3Client.DownloadMetadataOnly(ctx, s3Prefix, m.workDir); err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to download checkpoint metadata: %w", err)
+	// Download checkpoint data from storage
+	if strategy == "full" {
+		// full: download everything (metadata + pages) before restore
+		fmt.Printf("[%s] [TARGET-AGENT] Downloading full checkpoint from storage (strategy: full, prefix: %s)\n",
+			time.Now().Format("15:04:05.000"), s3Prefix)
+		if err := m.s3Client.DownloadFullCheckpoint(ctx, s3Prefix, m.workDir); err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to download full checkpoint: %w", err)
+		}
+		fmt.Printf("[%s] [TARGET-AGENT] Full checkpoint download completed\n",
+			time.Now().Format("15:04:05.000"))
+	} else {
+		// lazy-storage/lazy-direct/lazy-hybrid: download metadata only
+		if err := m.s3Client.DownloadMetadataOnly(ctx, s3Prefix, m.workDir); err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to download checkpoint metadata: %w", err)
+		}
 	}
 
 	// The final dump directory where restore will run
@@ -64,14 +75,22 @@ func (m *RestoreManager) Restore(ctx context.Context, dumpID, s3Prefix string, u
 		fmt.Printf("  %s -> %s\n", mountPoint, identifier)
 	}
 
+	// Determine if lazy-pages is needed
+	needsLazyPages := strategy == "lazy-storage" || strategy == "lazy-direct" || strategy == "lazy-hybrid"
+
 	var pageServerPID int
 	var lazyPagesCmd *exec.Cmd
-	if useLazyPages {
-		fmt.Printf("[DEBUG] Starting lazy-pages daemon to connect to source: %s:%d\n", sourceAddr, pageServerPort)
+	if needsLazyPages {
+		// For lazy-storage: sourceAddr is empty (fetch from storage only)
+		// For lazy-direct/lazy-hybrid: sourceAddr points to source page-server
+		lazySourceAddr := sourceAddr
+		if strategy == "lazy-storage" {
+			lazySourceAddr = "" // no page-server, storage only
+		}
 
-		// Controller already verified page-server is ready, start lazy-pages immediately
-		// Start lazy-pages daemon that connects to source pod's page server
-		pid, cmd, err := m.StartPageServer(ctx, pageServerPort, dumpDir, sourceAddr, s3Prefix)
+		fmt.Printf("[DEBUG] Starting lazy-pages daemon (strategy: %s, source: %s)\n", strategy, lazySourceAddr)
+
+		pid, cmd, err := m.StartPageServer(ctx, pageServerPort, dumpDir, lazySourceAddr, s3Prefix)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to start lazy-pages: %w", err)
 		}
@@ -79,12 +98,7 @@ func (m *RestoreManager) Restore(ctx context.Context, dumpID, s3Prefix string, u
 		lazyPagesCmd = cmd
 
 		fmt.Printf("[DEBUG] Lazy-pages daemon started with PID: %d\n", pageServerPID)
-		fmt.Printf("[DEBUG] Waiting 1 second for lazy-pages to be ready...\n")
-
-		// Wait for lazy-pages to be ready
 		time.Sleep(1 * time.Second)
-
-		fmt.Printf("[DEBUG] Lazy-pages should be ready now\n")
 	}
 
 	// Find main container PID to join its namespaces
@@ -100,7 +114,8 @@ func (m *RestoreManager) Restore(ctx context.Context, dumpID, s3Prefix string, u
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to open PID namespace: %w", err)
 	}
-	defer pidNsFd.Close()
+	// NOTE: Do NOT defer Close() here. The fd must stay open for the lifetime
+	// of the restored process. Caller is responsible for closing via RestoreResult.PidNsFd.
 
 	// Build CRIU restore command using CRIU's native namespace joining
 	// This approach:
@@ -109,9 +124,11 @@ func (m *RestoreManager) Restore(ctx context.Context, dumpID, s3Prefix string, u
 	// 3. Uses --join-ns to join main container's OTHER namespaces (uts, ipc, net)
 	// 4. Works cross-distribution (agent=Ubuntu, main=Alpine/Ubuntu/etc.)
 	// 5. No mount manipulation needed - mount namespace is inherited, not restored
+	pidFile := filepath.Join(dumpDir, "restored.pid")
 	args := []string{
 		"restore",
 		"-D", dumpDir,
+		"--pidfile", pidFile,
 		"--tcp-established",
 		"--shell-job",
 		"-v4",
@@ -150,52 +167,93 @@ func (m *RestoreManager) Restore(ctx context.Context, dumpID, s3Prefix string, u
 	// Auto-detect other external mounts (shared/slave mounts)
 	args = append(args, "--ext-mount-map", "auto")
 
-	if useLazyPages {
+	if needsLazyPages {
 		args = append(args, "--lazy-pages")
 	}
 
 	// Add S3/object storage options (use download endpoint for restore)
-	if m.s3Client != nil {
+	// For "full" strategy, all files are already local — skip object-storage args.
+	if m.s3Client != nil && strategy != "full" {
 		args = append(args,
 			"--enable-object-storage",
 			"--object-storage-endpoint-url", m.s3Client.getDownloadEndpoint(),
 		)
 
-		// Add bucket only if needed (CloudFront doesn't need bucket)
+		// Add bucket only if needed (MinIO and CloudFront skip this)
 		if m.s3Client.needsBucketOption() {
 			args = append(args,
 				"--object-storage-bucket", m.s3Client.bucket,
 			)
 		}
 
+		// Use getCRIUObjectPrefix which prepends bucket for MinIO (path-style)
 		args = append(args,
-			"--object-storage-object-prefix", s3Prefix+"/",
+			"--object-storage-object-prefix", m.s3Client.getCRIUObjectPrefix(s3Prefix),
 		)
 
-		// Add AWS credentials ONLY for express-one-zone
-		// Regular S3 and CloudFront use IAM roles or public access
-		if m.s3Client.isExpressOneZone() {
+		// Add AWS credentials for MinIO and S3 Express One Zone
+		if m.s3Client.needsCRIUCredentials() {
 			awsAccessKey := os.Getenv("AWS_ACCESS_KEY_ID")
 			awsSecretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
 			if awsAccessKey != "" && awsSecretKey != "" {
 				args = append(args,
 					"--aws-access-key", awsAccessKey,
 					"--aws-secret-key", awsSecretKey,
+					"--aws-region", m.s3Client.region,
 				)
 			}
-			args = append(args, "--express-one-zone")
+			if m.s3Client.needsCRIUExpressOneZone() {
+				args = append(args, "--express-one-zone")
+			}
 		}
+	}
+
+	// Replace dumped pipes with new pipe pairs to prevent SIGPIPE.
+	// During dump, stdout/stderr pipes were marked external (pipe[inode]:stdout/stderr).
+	// We create new pipe pairs and map them via --inherit-fd.
+	// Agent holds the read-end to drain output and prevent SIGPIPE.
+	extraFiles := []*os.File{pidNsFd} // fd3=pidns
+	fdIndex := 4                       // next available fd for ExtraFiles
+
+	// Replace dumped pipes with new pipe pairs using --inherit-fd fd[N]:pipe:[inode]
+	// Format: pipe:[inode] (with colon before bracket, matching /proc/pid/fd symlink format)
+	if stdoutInode, ok := pipeInodes["stdout"]; ok {
+		stdoutR, stdoutW, err := os.Pipe()
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to create stdout pipe: %w", err)
+		}
+		extraFiles = append(extraFiles, stdoutW)
+		args = append(args, "--inherit-fd", fmt.Sprintf("fd[%d]:pipe:[%s]", fdIndex, stdoutInode))
+		fmt.Printf("[TARGET-AGENT] Replacing stdout pipe:[%s] with new pipe at fd %d\n", stdoutInode, fdIndex)
+		fdIndex++
+		go func() {
+			io.Copy(os.Stdout, stdoutR)
+			stdoutR.Close()
+		}()
+	}
+	if stderrInode, ok := pipeInodes["stderr"]; ok {
+		stderrR, stderrW, err := os.Pipe()
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to create stderr pipe: %w", err)
+		}
+		extraFiles = append(extraFiles, stderrW)
+		args = append(args, "--inherit-fd", fmt.Sprintf("fd[%d]:pipe:[%s]", fdIndex, stderrInode))
+		fmt.Printf("[TARGET-AGENT] Replacing stderr pipe:[%s] with new pipe at fd %d\n", stderrInode, fdIndex)
+		fdIndex++
+		go func() {
+			io.Copy(os.Stderr, stderrR)
+			stderrR.Close()
+		}()
 	}
 
 	fmt.Printf("Executing CRIU restore with namespace joining: criu %s\n", strings.Join(args, " "))
 
 	// Execute CRIU restore
-	// IMPORTANT: criu restore becomes the parent process of the restored application
-	// We MUST NOT call cmd.Wait() because that would terminate the restore process
-	// and make the restored application an orphan
-	// DO NOT use exec.CommandContext - process must survive independently
+	// DO NOT use exec.CommandContext - process must survive independently of RPC context.
+	// The caller MUST call cmd.Wait() in a goroutine to reap the process and prevent zombies.
+	// Wait() does NOT kill the restored application — it only collects the exit status.
 	cmd := exec.Command("criu", args...)
-	cmd.ExtraFiles = []*os.File{pidNsFd} // Pass PID namespace fd at fd 3
+	cmd.ExtraFiles = extraFiles
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
@@ -227,12 +285,23 @@ func (m *RestoreManager) Restore(ctx context.Context, dumpID, s3Prefix string, u
 
 	duration := time.Since(startTime)
 
+	// Read restored process PID from pidfile (written by CRIU --pidfile)
+	var restoredPID int32
+	if pidData, err := os.ReadFile(pidFile); err == nil {
+		if pid, err := strconv.Atoi(strings.TrimSpace(string(pidData))); err == nil && pid > 0 {
+			restoredPID = int32(pid)
+			fmt.Printf("[%s] [TARGET-AGENT] Restored process PID (from pidfile): %d\n",
+				time.Now().Format("15:04:05.000"), pid)
+		}
+	}
+
 	result := &RestoreResult{
 		Success:       true,
-		NewPID:        0, // Will be set by caller
+		NewPID:        restoredPID,
 		Timestamp:     time.Now(),
 		DurationMs:    duration.Milliseconds(),
 		PageServerPID: pageServerPID,
+		PidNsFd:       pidNsFd,
 	}
 
 	// Return both lazy-pages cmd and restore cmd - caller MUST store them to keep processes alive
@@ -250,11 +319,14 @@ func (m *RestoreManager) StartPageServer(ctx context.Context, port int, checkpoi
 	args := []string{
 		"lazy-pages",
 		"--images-dir", checkpointDir,
-		"--page-server",
-		"--address", sourceAddr, // Connect to source pod's page server
-		"--port", strconv.Itoa(port),
 		"-v4",
 		"--log-file", filepath.Join(checkpointDir, "lazy-pages.log"),
+	}
+
+	// Connect to source page-server only if sourceAddr is provided
+	// For lazy-storage strategy, sourceAddr is empty — pages come from object storage only
+	if sourceAddr != "" {
+		args = append(args, "--page-server", "--address", sourceAddr, "--port", strconv.Itoa(port))
 	}
 
 	// Add async-prefetch if enabled
@@ -269,7 +341,7 @@ func (m *RestoreManager) StartPageServer(ctx context.Context, port int, checkpoi
 			"--object-storage-endpoint-url", m.s3Client.getDownloadEndpoint(),
 		)
 
-		// Add bucket only if needed (CloudFront doesn't need bucket)
+		// Add bucket only if needed (MinIO and CloudFront skip this)
 		if m.s3Client.needsBucketOption() {
 			args = append(args,
 				"--object-storage-bucket", m.s3Client.bucket,
@@ -279,22 +351,24 @@ func (m *RestoreManager) StartPageServer(ctx context.Context, port int, checkpoi
 		// Add object storage prefix (same as restore)
 		if s3Prefix != "" {
 			args = append(args,
-				"--object-storage-object-prefix", s3Prefix+"/",
+				"--object-storage-object-prefix", m.s3Client.getCRIUObjectPrefix(s3Prefix),
 			)
 		}
 
-		// Add AWS credentials ONLY for express-one-zone
-		// Regular S3 and CloudFront use IAM roles or public access
-		if m.s3Client.isExpressOneZone() {
+		// Add AWS credentials for MinIO and S3 Express One Zone
+		if m.s3Client.needsCRIUCredentials() {
 			awsAccessKey := os.Getenv("AWS_ACCESS_KEY_ID")
 			awsSecretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
 			if awsAccessKey != "" && awsSecretKey != "" {
 				args = append(args,
 					"--aws-access-key", awsAccessKey,
 					"--aws-secret-key", awsSecretKey,
+					"--aws-region", m.s3Client.region,
 				)
 			}
-			args = append(args, "--express-one-zone")
+			if m.s3Client.needsCRIUExpressOneZone() {
+				args = append(args, "--express-one-zone")
+			}
 		}
 	}
 
@@ -430,7 +504,7 @@ func (m *RestoreManager) CreateBaselineCheckpoint(ctx context.Context, pid int, 
 	time.Sleep(2 * time.Second)
 
 	// Create a new baseline checkpoint (no parent)
-	result, err := checkpointMgr.PreCheckpoint(ctx, pid, "")
+	result, err := checkpointMgr.PreCheckpoint(ctx, pid, "", nil)
 	if err != nil {
 		return fmt.Errorf("failed to create baseline checkpoint: %w", err)
 	}
@@ -451,6 +525,7 @@ type RestoreResult struct {
 	Timestamp     time.Time
 	DurationMs    int64
 	PageServerPID int
+	PidNsFd       *os.File // PID namespace fd — caller must keep open until process exits
 }
 
 // verifyPageServerConnection checks if the source page-server is reachable

@@ -10,8 +10,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ddps-lab/criu-migration-operator/pkg/profiler"
 	"github.com/google/uuid"
 )
+
+// CRIUExcludeArgs holds address ranges to pass to CRIU for hot page skipping.
+type CRIUExcludeArgs struct {
+	ExcludeRanges  []profiler.AddrRange // --exclude-range (currently hot VMAs)
+	NoParentRanges []profiler.AddrRange // --no-parent-range (hot→cold transition VMAs)
+}
 
 // CheckpointManager handles CRIU checkpoint operations
 type CheckpointManager struct {
@@ -26,6 +33,9 @@ type CheckpointManager struct {
 	chainRoot        string
 	chainDepth       int
 	generation       int
+
+	// Known main process PID (set by agent after startUserProcess)
+	knownMainPID int
 }
 
 // NewCheckpointManager creates a new checkpoint manager
@@ -64,7 +74,7 @@ func NewCheckpointManager(workDir string, s3Client *S3Client, podName, nodeName 
 }
 
 // PreCheckpoint performs an incremental pre-checkpoint
-func (m *CheckpointManager) PreCheckpoint(ctx context.Context, pid int, parentDumpID string) (*CheckpointResult, error) {
+func (m *CheckpointManager) PreCheckpoint(ctx context.Context, pid int, parentDumpID string, excludeArgs *CRIUExcludeArgs) (*CheckpointResult, error) {
 	dumpID := m.generateDumpID()
 	dumpDir := filepath.Join(m.workDir, dumpID)
 
@@ -92,6 +102,9 @@ func (m *CheckpointManager) PreCheckpoint(ctx context.Context, pid int, parentDu
 			args = append(args, "--prev-images-dir", parentDir)
 		}
 	}
+
+	// Add exclude args for hot page skipping
+	args = appendExcludeArgs(args, excludeArgs, dumpDir)
 
 	// Execute CRIU dump directly from agent container
 	// We DON'T need nsenter for dump because:
@@ -149,7 +162,7 @@ func (m *CheckpointManager) PreCheckpoint(ctx context.Context, pid int, parentDu
 // FinalDump performs the final dump with page-server
 // This returns immediately after starting the dump; CRIU runs in background as page-server
 // The cmd parameter should be stored by the caller to keep the process alive
-func (m *CheckpointManager) FinalDump(ctx context.Context, pid int, pageServerAddr string, pageServerPort int, parentDumpID string) (*CheckpointResult, *exec.Cmd, error) {
+func (m *CheckpointManager) FinalDump(ctx context.Context, pid int, pageServerAddr string, pageServerPort int, parentDumpID string, excludeArgs *CRIUExcludeArgs, strategy string) (*CheckpointResult, *exec.Cmd, error) {
 	dumpID := m.generateDumpID()
 	dumpDir := filepath.Join(m.workDir, dumpID)
 
@@ -177,21 +190,32 @@ func (m *CheckpointManager) FinalDump(ctx context.Context, pid int, pageServerAd
 	pidNsInode = strings.TrimSuffix(pidNsInode, "]")
 	fmt.Printf("Detected PID namespace inode: %s (from %s)\n", pidNsInode, pidNsLink)
 
-	// Build CRIU command with lazy-pages (this pod acts as page server)
-	// Simplified: removed --manage-cgroups and --mntns-compat-mode
+	// Determine if this strategy uses page-server (lazy-direct, lazy-hybrid)
+	usePageServer := strategy == "lazy-direct" || strategy == "lazy-hybrid"
+
+	// Build CRIU dump command
 	args := []string{
 		"dump",
 		"-t", strconv.Itoa(pid),
 		"-D", dumpDir,
-		"--root", fmt.Sprintf("/proc/%d/root", pid), // Use main container's filesystem root
-		"--lazy-pages",
-		"--address", "0.0.0.0", // Listen on all interfaces
-		"--port", strconv.Itoa(pageServerPort),
+		"--root", fmt.Sprintf("/proc/%d/root", pid),
 		"--tcp-established",
 		"--shell-job",
 		"-v4",
 		"--log-file", filepath.Join(dumpDir, "criu.log"),
 		"--evasive-devices",
+	}
+
+	// Add page-server options only for lazy-direct/lazy-hybrid strategies
+	var pidFile string
+	if usePageServer {
+		pidFile = filepath.Join(dumpDir, "page-server.pid")
+		args = append(args,
+			"--pidfile", pidFile,
+			"--lazy-pages",
+			"--address", "0.0.0.0",
+			"--port", strconv.Itoa(pageServerPort),
+		)
 	}
 
 	// Mark PID namespace as external (will be injected via inherit-fd during restore)
@@ -208,6 +232,25 @@ func (m *CheckpointManager) FinalDump(ctx context.Context, pid int, pageServerAd
 	// Auto-detect other external mounts (shared/slave mounts like /dev/shm, serviceaccount token)
 	args = append(args, "--external", "mnt[]:ms")
 
+	// Record stdout/stderr pipe inodes for restore-time replacement.
+	// In K8s, these are containerd log-collection pipes. After restore in a different pod,
+	// the pipe read-end doesn't exist → SIGPIPE kills the process.
+	// We record the inodes here and use --inherit-fd pipe:[inode] on restore to replace them.
+	// Note: We do NOT mark them as --external during dump. CRIU dumps them normally,
+	// and --inherit-fd on restore replaces the pipe with a new one.
+	pipeInodes := make(map[string]string) // "stdout" -> "232671"
+	fdLabels := map[int]string{1: "stdout", 2: "stderr"}
+	for fd, label := range fdLabels {
+		linkPath := fmt.Sprintf("/proc/%d/fd/%d", pid, fd)
+		link, err := os.Readlink(linkPath)
+		if err == nil && strings.HasPrefix(link, "pipe:[") {
+			inode := strings.TrimPrefix(link, "pipe:[")
+			inode = strings.TrimSuffix(inode, "]")
+			pipeInodes[label] = inode
+			fmt.Printf("[SOURCE-AGENT] Recorded pipe fd %d inode %s as %s\n", fd, inode, label)
+		}
+	}
+
 	// Add parent reference for incremental dump
 	if parentDumpID != "" {
 		parentDir := filepath.Join(m.workDir, parentDumpID)
@@ -215,6 +258,9 @@ func (m *CheckpointManager) FinalDump(ctx context.Context, pid int, pageServerAd
 			args = append(args, "--prev-images-dir", parentDir)
 		}
 	}
+
+	// Add exclude args for hot page skipping (final dump: has_parent=false for hot VMAs)
+	args = appendExcludeArgs(args, excludeArgs, dumpDir)
 
 	fmt.Printf("CRIU dump args: %v\n", args)
 
@@ -225,69 +271,55 @@ func (m *CheckpointManager) FinalDump(ctx context.Context, pid int, pageServerAd
 	fmt.Printf("criu %s\n", strings.Join(args, " "))
 	fmt.Printf("======================================\n")
 
-	// Start CRIU dump in background (it will act as page-server)
-	// IMPORTANT: DO NOT use exec.CommandContext here!
-	// We need the process to survive independently of any context lifecycle
-	// The process should only terminate when lazy-pages completes page transfer
 	cmd := exec.Command("criu", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	if err := cmd.Start(); err != nil {
-		return nil, nil, fmt.Errorf("failed to start criu dump: %w", err)
-	}
+	var pageServerPID int
+	var pageServerCmd *exec.Cmd
 
-	// Store page-server PID for tracking
-	pageServerPID := cmd.Process.Pid
-	fmt.Printf("[%s] [SOURCE-AGENT] Started CRIU dump (page-server) with PID: %d\n",
-		time.Now().Format("15:04:05.000"), pageServerPID)
-	fmt.Printf("[%s] [SOURCE-AGENT] Page-server is now running and waiting for lazy-pages connection\n",
-		time.Now().Format("15:04:05.000"))
+	if usePageServer {
+		// lazy-direct / lazy-hybrid: Start dump in background, CRIU becomes page-server
+		if err := cmd.Start(); err != nil {
+			return nil, nil, fmt.Errorf("failed to start criu dump: %w", err)
+		}
+		criuPID := cmd.Process.Pid
+		fmt.Printf("[%s] [SOURCE-AGENT] Started CRIU dump (page-server mode) with PID: %d\n",
+			time.Now().Format("15:04:05.000"), criuPID)
 
-	// Wait for checkpoint metadata files to be created (not for process to complete)
-	// This indicates CRIU has started and created the checkpoint structure
-	if err := m.waitForCheckpointFiles(dumpDir, 30*time.Second); err != nil {
-		// Try to kill the CRIU process if it failed
-		if cmd.Process != nil {
-			cmd.Process.Kill()
+		if err := m.waitForCheckpointFiles(dumpDir, 30*time.Second); err != nil {
+			if cmd.Process != nil {
+				cmd.Process.Kill()
+			}
+			criuLog := m.readLogFile(filepath.Join(dumpDir, "criu.log"), 100)
+			return nil, nil, fmt.Errorf("failed to wait for checkpoint files: %w\n\nCRIU Log:\n%s", err, criuLog)
 		}
 
-		// Read CRIU log for debugging
-		criuLog := m.readLogFile(filepath.Join(dumpDir, "criu.log"), 100)
-		return nil, nil, fmt.Errorf("failed to wait for checkpoint files: %w\n\nCRIU Log:\n%s", err, criuLog)
-	}
-
-	fmt.Printf("[%s] [SOURCE-AGENT] Checkpoint metadata files created successfully\n",
-		time.Now().Format("15:04:05.000"))
-
-	// Print CRIU log output
-	criuLogPath := filepath.Join(dumpDir, "criu.log")
-	if logContent, err := os.ReadFile(criuLogPath); err == nil {
-		fmt.Printf("======================================\n")
-		fmt.Printf("CRIU DUMP LOG OUTPUT (last 50 lines):\n")
-		fmt.Printf("======================================\n")
-		lines := strings.Split(string(logContent), "\n")
-		startIdx := len(lines) - 50
-		if startIdx < 0 {
-			startIdx = 0
-		}
-		for _, line := range lines[startIdx:] {
-			if line != "" {
-				fmt.Println(line)
+		// Read page-server PID from pidfile
+		pageServerPID = criuPID
+		if pidFile != "" {
+			if pidData, err := os.ReadFile(pidFile); err == nil {
+				if pid, err := strconv.Atoi(strings.TrimSpace(string(pidData))); err == nil && pid > 0 {
+					pageServerPID = pid
+				}
 			}
 		}
-		fmt.Printf("======================================\n")
-	}
-
-	// Check if process is still running
-	procPath := fmt.Sprintf("/proc/%d", pageServerPID)
-	if _, err := os.Stat(procPath); os.IsNotExist(err) {
-		fmt.Printf("[DEBUG] WARNING: Page-server process %d has ALREADY TERMINATED after metadata creation!\n", pageServerPID)
+		fmt.Printf("[%s] [SOURCE-AGENT] Page-server PID: %d\n",
+			time.Now().Format("15:04:05.000"), pageServerPID)
+		pageServerCmd = cmd
 	} else {
-		fmt.Printf("[DEBUG] Page-server process %d is still RUNNING (good!)\n", pageServerPID)
+		// full / lazy-storage: Run dump synchronously, no page-server
+		fmt.Printf("[%s] [SOURCE-AGENT] Running CRIU dump (strategy: %s, no page-server)\n",
+			time.Now().Format("15:04:05.000"), strategy)
+		if err := cmd.Run(); err != nil {
+			criuLog := m.readLogFile(filepath.Join(dumpDir, "criu.log"), 100)
+			return nil, nil, fmt.Errorf("criu dump failed: %w\nCRIU Log:\n%s", err, criuLog)
+		}
+		fmt.Printf("[%s] [SOURCE-AGENT] CRIU dump completed successfully\n",
+			time.Now().Format("15:04:05.000"))
 	}
 
-	// Get metadata size (pages sent via page-server)
+	// Get checkpoint size
 	size, err := m.getDirectorySize(dumpDir)
 	if err != nil {
 		size = 0
@@ -297,28 +329,52 @@ func (m *CheckpointManager) FinalDump(ctx context.Context, pid int, pageServerAd
 		DumpID:          dumpID,
 		Timestamp:       time.Now(),
 		SizeBytes:       size,
-		ExternalMounts:  externalMounts, // Pass external mounts to controller
-		PageServerPID:   pageServerPID,   // Return page-server PID for tracking
-		PageServerAlive: true,            // Indicate that page-server is running
+		ExternalMounts:  externalMounts,
+		PipeInodes:      pipeInodes,
+		PageServerPID:   pageServerPID,
+		PageServerAlive: pageServerPID > 0,
 	}
 
-	// Upload ALL files (including pages-*.img) to S3 asynchronously
-	// Even though pages are sent via page-server during migration, they must be uploaded
-	// to S3 for restore to work (CRIU will fetch them from S3 when lazy-pages daemon needs them)
-	go func() {
-		uploadCtx := context.Background()
-		s3Prefix := m.getS3Prefix(dumpID)
-		if err := m.s3Client.UploadCheckpoint(uploadCtx, dumpDir, s3Prefix); err != nil {
-			fmt.Printf("Failed to upload checkpoint to S3: %v\n", err)
-			return
+	// Storage upload: sync for full/lazy-storage, async for lazy-hybrid, skip for lazy-direct
+	s3Prefix := m.getS3Prefix(dumpID)
+	switch strategy {
+	case "full", "lazy-storage":
+		// Synchronous upload — must complete before returning
+		fmt.Printf("[%s] [SOURCE-AGENT] Uploading checkpoint to storage (synchronous)...\n",
+			time.Now().Format("15:04:05.000"))
+		if err := m.s3Client.UploadCheckpoint(ctx, dumpDir, s3Prefix); err != nil {
+			return nil, nil, fmt.Errorf("failed to upload checkpoint to storage: %w", err)
 		}
-		fmt.Printf("Successfully uploaded checkpoint to S3: %s\n", s3Prefix)
-	}()
+		fmt.Printf("[%s] [SOURCE-AGENT] Storage upload completed: %s\n",
+			time.Now().Format("15:04:05.000"), s3Prefix)
+	case "lazy-hybrid":
+		// Async upload — page-server serves pages, storage is fallback
+		go func() {
+			uploadCtx := context.Background()
+			if err := m.s3Client.UploadCheckpoint(uploadCtx, dumpDir, s3Prefix); err != nil {
+				fmt.Printf("Failed to upload checkpoint to storage: %v\n", err)
+				return
+			}
+			fmt.Printf("Successfully uploaded checkpoint to storage: %s\n", s3Prefix)
+		}()
+	case "lazy-direct":
+		// Upload checkpoint metadata (pages served via page-server, but target needs
+		// metadata files to initialize lazy-pages daemon).
+		// With --lazy-pages dump, pages-*.img files are minimal (lazy stubs).
+		fmt.Printf("[%s] [SOURCE-AGENT] Uploading checkpoint metadata to storage (lazy-direct)\n",
+			time.Now().Format("15:04:05.000"))
+		go func() {
+			uploadCtx := context.Background()
+			if err := m.s3Client.UploadCheckpoint(uploadCtx, dumpDir, s3Prefix); err != nil {
+				fmt.Printf("Failed to upload checkpoint to storage: %v\n", err)
+				return
+			}
+			fmt.Printf("Successfully uploaded checkpoint to storage: %s\n", s3Prefix)
+		}()
+	}
 
-	fmt.Printf("[DEBUG] FinalDump returning result with page-server PID %d and cmd object\n", pageServerPID)
-
-	// Return both result and cmd - caller MUST store cmd to keep process alive
-	return result, cmd, nil
+	fmt.Printf("[DEBUG] FinalDump returning (strategy: %s, pageServerPID: %d)\n", strategy, pageServerPID)
+	return result, pageServerCmd, nil
 }
 
 // waitForCheckpointFiles waits for essential checkpoint files to be created
@@ -354,9 +410,23 @@ func (m *CheckpointManager) waitForCheckpointFiles(dumpDir string, timeout time.
 	return fmt.Errorf("timeout waiting for checkpoint files to be created")
 }
 
+// SetMainPID stores a known-good PID for the main user process.
+func (m *CheckpointManager) SetMainPID(pid int) {
+	m.knownMainPID = pid
+}
+
 // FindMainProcessPID finds the PID of the main application process
 func (m *CheckpointManager) FindMainProcessPID() (int, error) {
-	// Common process names to look for
+	// First: check if we have a known PID and it's still alive
+	if m.knownMainPID > 0 {
+		if _, err := os.Stat(fmt.Sprintf("/proc/%d/status", m.knownMainPID)); err == nil {
+			return m.knownMainPID, nil
+		}
+		// PID died, clear it
+		m.knownMainPID = 0
+	}
+
+	// Fallback: common process names to look for
 	processNames := []string{
 		"python",
 		"python3",
@@ -550,6 +620,52 @@ type CheckpointResult struct {
 	SizeBytes       int64
 	PagesDumped     int64
 	ExternalMounts  map[string]string // mountpoint -> identifier
-	PageServerPID   int                // PID of page-server process (for final dump)
-	PageServerAlive bool               // Whether page-server is still running
+	PipeInodes      map[string]string // fd label -> inode (e.g., "stdout" -> "232671")
+	PageServerPID   int               // PID of page-server process (for final dump)
+	PageServerAlive bool              // Whether page-server is still running
+}
+
+// appendExcludeArgs appends --exclude-range/--exclude-file and --no-parent-range args to CRIU command.
+func appendExcludeArgs(args []string, excludeArgs *CRIUExcludeArgs, dumpDir string) []string {
+	if excludeArgs == nil {
+		return args
+	}
+
+	// Exclude ranges: use --exclude-file for large sets, --exclude-range for small sets
+	if len(excludeArgs.ExcludeRanges) > 10 {
+		excludePath := filepath.Join(dumpDir, "exclude-ranges.txt")
+		if err := writeExcludeFile(excludePath, excludeArgs.ExcludeRanges); err != nil {
+			fmt.Printf("Warning: failed to write exclude file: %v\n", err)
+		} else {
+			args = append(args, "--exclude-file", excludePath)
+		}
+	} else {
+		for _, r := range excludeArgs.ExcludeRanges {
+			args = append(args, "--exclude-range", fmt.Sprintf("%x:%x", r.Start, r.End))
+		}
+	}
+
+	// No-parent ranges (hot→cold transition)
+	for _, r := range excludeArgs.NoParentRanges {
+		args = append(args, "--no-parent-range", fmt.Sprintf("%x:%x", r.Start, r.End))
+	}
+
+	return args
+}
+
+// writeExcludeFile writes address ranges to a file in space-separated format (for --exclude-file).
+// Format: "start_hex end_hex" per line (CRIU reads via fscanf "%lx %lx").
+func writeExcludeFile(path string, ranges []profiler.AddrRange) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	for _, r := range ranges {
+		if _, err := fmt.Fprintf(f, "%x %x\n", r.Start, r.End); err != nil {
+			return err
+		}
+	}
+	return nil
 }

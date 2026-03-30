@@ -25,6 +25,10 @@ const (
 	CRIUAgent_GetStatus_FullMethodName             = "/agent.CRIUAgent/GetStatus"
 	CRIUAgent_StartPageServer_FullMethodName       = "/agent.CRIUAgent/StartPageServer"
 	CRIUAgent_CheckPageServerStatus_FullMethodName = "/agent.CRIUAgent/CheckPageServerStatus"
+	CRIUAgent_StartProfiling_FullMethodName        = "/agent.CRIUAgent/StartProfiling"
+	CRIUAgent_StopProfiling_FullMethodName         = "/agent.CRIUAgent/StopProfiling"
+	CRIUAgent_GetHotRegions_FullMethodName         = "/agent.CRIUAgent/GetHotRegions"
+	CRIUAgent_GetDirtyVolume_FullMethodName        = "/agent.CRIUAgent/GetDirtyVolume"
 )
 
 // CRIUAgentClient is the client API for CRIUAgent service.
@@ -45,6 +49,14 @@ type CRIUAgentClient interface {
 	StartPageServer(ctx context.Context, in *PageServerRequest, opts ...grpc.CallOption) (*PageServerResponse, error)
 	// CheckPageServerStatus checks if a page-server process is still running
 	CheckPageServerStatus(ctx context.Context, in *PageServerStatusRequest, opts ...grpc.CallOption) (*PageServerStatusResponse, error)
+	// StartProfiling starts memory write profiling on the main process
+	StartProfiling(ctx context.Context, in *StartProfilingRequest, opts ...grpc.CallOption) (*StartProfilingResponse, error)
+	// StopProfiling stops memory write profiling
+	StopProfiling(ctx context.Context, in *StopProfilingRequest, opts ...grpc.CallOption) (*StopProfilingResponse, error)
+	// GetHotRegions returns currently identified hot memory regions
+	GetHotRegions(ctx context.Context, in *GetHotRegionsRequest, opts ...grpc.CallOption) (*GetHotRegionsResponse, error)
+	// GetDirtyVolume returns current dirty page statistics
+	GetDirtyVolume(ctx context.Context, in *GetDirtyVolumeRequest, opts ...grpc.CallOption) (*GetDirtyVolumeResponse, error)
 }
 
 type cRIUAgentClient struct {
@@ -115,6 +127,46 @@ func (c *cRIUAgentClient) CheckPageServerStatus(ctx context.Context, in *PageSer
 	return out, nil
 }
 
+func (c *cRIUAgentClient) StartProfiling(ctx context.Context, in *StartProfilingRequest, opts ...grpc.CallOption) (*StartProfilingResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StartProfilingResponse)
+	err := c.cc.Invoke(ctx, CRIUAgent_StartProfiling_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *cRIUAgentClient) StopProfiling(ctx context.Context, in *StopProfilingRequest, opts ...grpc.CallOption) (*StopProfilingResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StopProfilingResponse)
+	err := c.cc.Invoke(ctx, CRIUAgent_StopProfiling_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *cRIUAgentClient) GetHotRegions(ctx context.Context, in *GetHotRegionsRequest, opts ...grpc.CallOption) (*GetHotRegionsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetHotRegionsResponse)
+	err := c.cc.Invoke(ctx, CRIUAgent_GetHotRegions_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *cRIUAgentClient) GetDirtyVolume(ctx context.Context, in *GetDirtyVolumeRequest, opts ...grpc.CallOption) (*GetDirtyVolumeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetDirtyVolumeResponse)
+	err := c.cc.Invoke(ctx, CRIUAgent_GetDirtyVolume_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CRIUAgentServer is the server API for CRIUAgent service.
 // All implementations must embed UnimplementedCRIUAgentServer
 // for forward compatibility.
@@ -133,6 +185,14 @@ type CRIUAgentServer interface {
 	StartPageServer(context.Context, *PageServerRequest) (*PageServerResponse, error)
 	// CheckPageServerStatus checks if a page-server process is still running
 	CheckPageServerStatus(context.Context, *PageServerStatusRequest) (*PageServerStatusResponse, error)
+	// StartProfiling starts memory write profiling on the main process
+	StartProfiling(context.Context, *StartProfilingRequest) (*StartProfilingResponse, error)
+	// StopProfiling stops memory write profiling
+	StopProfiling(context.Context, *StopProfilingRequest) (*StopProfilingResponse, error)
+	// GetHotRegions returns currently identified hot memory regions
+	GetHotRegions(context.Context, *GetHotRegionsRequest) (*GetHotRegionsResponse, error)
+	// GetDirtyVolume returns current dirty page statistics
+	GetDirtyVolume(context.Context, *GetDirtyVolumeRequest) (*GetDirtyVolumeResponse, error)
 	mustEmbedUnimplementedCRIUAgentServer()
 }
 
@@ -160,6 +220,18 @@ func (UnimplementedCRIUAgentServer) StartPageServer(context.Context, *PageServer
 }
 func (UnimplementedCRIUAgentServer) CheckPageServerStatus(context.Context, *PageServerStatusRequest) (*PageServerStatusResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CheckPageServerStatus not implemented")
+}
+func (UnimplementedCRIUAgentServer) StartProfiling(context.Context, *StartProfilingRequest) (*StartProfilingResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method StartProfiling not implemented")
+}
+func (UnimplementedCRIUAgentServer) StopProfiling(context.Context, *StopProfilingRequest) (*StopProfilingResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method StopProfiling not implemented")
+}
+func (UnimplementedCRIUAgentServer) GetHotRegions(context.Context, *GetHotRegionsRequest) (*GetHotRegionsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetHotRegions not implemented")
+}
+func (UnimplementedCRIUAgentServer) GetDirtyVolume(context.Context, *GetDirtyVolumeRequest) (*GetDirtyVolumeResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method GetDirtyVolume not implemented")
 }
 func (UnimplementedCRIUAgentServer) mustEmbedUnimplementedCRIUAgentServer() {}
 func (UnimplementedCRIUAgentServer) testEmbeddedByValue()                   {}
@@ -290,6 +362,78 @@ func _CRIUAgent_CheckPageServerStatus_Handler(srv interface{}, ctx context.Conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _CRIUAgent_StartProfiling_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StartProfilingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CRIUAgentServer).StartProfiling(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CRIUAgent_StartProfiling_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CRIUAgentServer).StartProfiling(ctx, req.(*StartProfilingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _CRIUAgent_StopProfiling_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StopProfilingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CRIUAgentServer).StopProfiling(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CRIUAgent_StopProfiling_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CRIUAgentServer).StopProfiling(ctx, req.(*StopProfilingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _CRIUAgent_GetHotRegions_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetHotRegionsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CRIUAgentServer).GetHotRegions(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CRIUAgent_GetHotRegions_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CRIUAgentServer).GetHotRegions(ctx, req.(*GetHotRegionsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _CRIUAgent_GetDirtyVolume_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetDirtyVolumeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(CRIUAgentServer).GetDirtyVolume(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: CRIUAgent_GetDirtyVolume_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(CRIUAgentServer).GetDirtyVolume(ctx, req.(*GetDirtyVolumeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // CRIUAgent_ServiceDesc is the grpc.ServiceDesc for CRIUAgent service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -320,6 +464,22 @@ var CRIUAgent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CheckPageServerStatus",
 			Handler:    _CRIUAgent_CheckPageServerStatus_Handler,
+		},
+		{
+			MethodName: "StartProfiling",
+			Handler:    _CRIUAgent_StartProfiling_Handler,
+		},
+		{
+			MethodName: "StopProfiling",
+			Handler:    _CRIUAgent_StopProfiling_Handler,
+		},
+		{
+			MethodName: "GetHotRegions",
+			Handler:    _CRIUAgent_GetHotRegions_Handler,
+		},
+		{
+			MethodName: "GetDirtyVolume",
+			Handler:    _CRIUAgent_GetDirtyVolume_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

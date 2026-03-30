@@ -23,6 +23,20 @@ service CRIUAgent {
 
   // CheckPageServerStatus checks if a page-server process is still running
   rpc CheckPageServerStatus(PageServerStatusRequest) returns (PageServerStatusResponse);
+
+  // === Write Profiler ===
+
+  // StartProfiling starts memory write profiling on the main process
+  rpc StartProfiling(StartProfilingRequest) returns (StartProfilingResponse);
+
+  // StopProfiling stops memory write profiling
+  rpc StopProfiling(StopProfilingRequest) returns (StopProfilingResponse);
+
+  // GetHotRegions returns currently identified hot memory regions
+  rpc GetHotRegions(GetHotRegionsRequest) returns (GetHotRegionsResponse);
+
+  // GetDirtyVolume returns current dirty page statistics
+  rpc GetDirtyVolume(GetDirtyVolumeRequest) returns (GetDirtyVolumeResponse);
 }
 
 // PreCheckpointRequest contains parameters for pre-checkpoint
@@ -62,6 +76,9 @@ message FinalDumpRequest {
 
   // Whether to leave process running (for testing)
   bool leave_running = 4;
+
+  // Migration strategy: full, lazy-storage, lazy-direct, lazy-hybrid
+  string migration_strategy = 5;
 }
 
 // FinalDumpResponse contains the result of final dump
@@ -80,6 +97,9 @@ message FinalDumpResponse {
 
   // PID of page-server process (for tracking completion)
   int32 page_server_pid = 5;
+
+  // Pipe inodes from dumped process (label -> inode, e.g., "stdout" -> "232671")
+  map<string, string> pipe_inodes = 6;
 }
 
 // RestoreRequest contains parameters for restore
@@ -104,6 +124,12 @@ message RestoreRequest {
 
   // External mounts to use during restore (mountpoint -> identifier)
   map<string, string> external_mounts = 7;
+
+  // Migration strategy: full, lazy-storage, lazy-direct, lazy-hybrid
+  string migration_strategy = 8;
+
+  // Pipe inodes from dump (label -> inode) for --inherit-fd mapping
+  map<string, string> pipe_inodes = 9;
 }
 
 // RestoreResponse contains the result of restore
@@ -146,6 +172,9 @@ message StatusResponse {
 
   // Agent uptime in seconds
   int64 uptime_seconds = 7;
+
+  // Whether lazy-pages is still transferring pages (blocks checkpoints)
+  bool lazy_pages_active = 8;
 }
 
 // PageServerRequest contains parameters for starting page-server
@@ -188,4 +217,66 @@ message PageServerStatusResponse {
 
   // Human-readable status message
   string status_message = 3;
+}
+
+// === Write Profiler Messages ===
+
+// StartProfilingRequest contains parameters for starting memory write profiling
+message StartProfilingRequest {
+  // Scan interval in milliseconds (default: 1000)
+  int32 interval_ms = 1;
+
+  // Written ratio threshold for hot classification (default: 0.3)
+  double hot_threshold = 2;
+
+  // Consecutive hot intervals to mark VMA as hot (default: 3)
+  int32 hot_consecutive = 3;
+}
+
+// StartProfilingResponse contains the result of starting profiling
+message StartProfilingResponse {
+  bool success = 1;
+  string error = 2;
+  int32 pid = 3;
+  int32 vma_count = 4;
+}
+
+// StopProfilingRequest is empty
+message StopProfilingRequest {}
+
+// StopProfilingResponse contains the result of stopping profiling
+message StopProfilingResponse {
+  bool success = 1;
+}
+
+// GetHotRegionsRequest is empty
+message GetHotRegionsRequest {}
+
+// GetHotRegionsResponse contains the current hot memory regions
+message GetHotRegionsResponse {
+  repeated HotRegionProto regions = 1;
+  int64 timestamp_ms = 2;
+  int32 total_vmas = 3;
+  int32 hot_vmas = 4;
+}
+
+// HotRegionProto represents a hot memory region
+message HotRegionProto {
+  uint64 start_addr = 1;
+  uint64 end_addr = 2;
+  double written_ratio = 3;
+  int32 consecutive_hot = 4;
+}
+
+// GetDirtyVolumeRequest is empty
+message GetDirtyVolumeRequest {}
+
+// GetDirtyVolumeResponse contains current dirty page statistics
+message GetDirtyVolumeResponse {
+  int64 dirty_pages = 1;
+  int64 dirty_bytes = 2;
+  double dirty_rate_pages_per_sec = 3;
+  int64 cumulative_dirty_bytes = 4;
+  double avg_dirty_rate = 5;
+  int64 timestamp_ms = 6;
 }
