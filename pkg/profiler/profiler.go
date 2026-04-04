@@ -318,6 +318,16 @@ func (p *Profiler) GetHotRegions() []HotRegion {
 	return result
 }
 
+// GetVMADetails returns all tracked VMAs with hot/cold classification.
+func (p *Profiler) GetVMADetails() []VMAHotDetail {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.heat == nil {
+		return nil
+	}
+	return p.heat.getAllVMAs()
+}
+
 // GetDirtyVolume returns a snapshot of current dirty volume statistics.
 func (p *Profiler) GetDirtyVolume() DirtyVolume {
 	p.mu.RLock()

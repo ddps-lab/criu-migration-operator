@@ -16,6 +16,8 @@ type scanResult struct {
 	VMAEnd     uint64
 	DirtyPages int64
 	TotalPages uint64
+	VMAType    VMAType
+	Pathname   string
 }
 
 // openPagemap opens /proc/pid/pagemap for PAGEMAP_SCAN ioctl.
@@ -117,6 +119,8 @@ func scanDirtyPages(pagemapFd int, vmas []VMAInfo) ([]scanResult, int64, error) 
 			VMAEnd:     vmas[i].End,
 			DirtyPages: vmaDirty,
 			TotalPages: totalPages,
+			VMAType:    vmas[i].Type,
+			Pathname:   vmas[i].Pathname,
 		})
 		totalDirty += vmaDirty
 	}

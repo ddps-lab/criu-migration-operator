@@ -258,6 +258,9 @@ message GetHotRegionsResponse {
   int64 timestamp_ms = 2;
   int32 total_vmas = 3;
   int32 hot_vmas = 4;
+
+  // Full VMA details (hot + cold) for checkpoint metadata and prefetch priority
+  repeated VMAHotInfo vma_details = 5;
 }
 
 // HotRegionProto represents a hot memory region
@@ -266,6 +269,19 @@ message HotRegionProto {
   uint64 end_addr = 2;
   double written_ratio = 3;
   int32 consecutive_hot = 4;
+}
+
+// VMAHotInfo contains per-VMA hot/cold classification with dirty stats
+message VMAHotInfo {
+  uint64 start_addr = 1;
+  uint64 end_addr = 2;
+  string type = 3;             // "heap", "anonymous", "data", "stack", etc.
+  string pathname = 4;
+  bool is_hot = 5;
+  int64 dirty_pages = 6;
+  int64 total_pages = 7;
+  double dirty_ratio = 8;
+  int32 consecutive_hot = 9;
 }
 
 // GetDirtyVolumeRequest is empty

@@ -18,6 +18,10 @@ type vmaHeatState struct {
 	Count          int                 // number of samples added
 	ConsecutiveHot int                 // consecutive intervals above threshold
 	IsHot          bool
+	LastDirty      int64   // dirty pages in most recent scan
+	LastTotal      uint64  // total pages in most recent scan
+	VMAType        VMAType // VMA type (heap, anonymous, etc.)
+	Pathname       string  // VMA pathname (e.g., "[heap]", "/lib/x.so")
 }
 
 func newHeatClassifier(hotThreshold float64, hotConsecutive int) *heatClassifier {
@@ -47,6 +51,12 @@ func (h *heatClassifier) update(results []scanResult) []HotRegion {
 		}
 		// Update address range in case VMA was resized
 		state.End = r.VMAEnd
+
+		// Store dirty/total pages and VMA info for this interval
+		state.LastDirty = r.DirtyPages
+		state.LastTotal = r.TotalPages
+		state.VMAType = r.VMAType
+		state.Pathname = r.Pathname
 
 		// Calculate written ratio for this interval
 		var ratio float64
@@ -103,6 +113,43 @@ func (h *heatClassifier) reset() {
 // totalVMAs returns the number of tracked VMAs.
 func (h *heatClassifier) totalVMAs() int {
 	return len(h.states)
+}
+
+// VMAHotDetail contains per-VMA hot/cold classification with dirty stats.
+type VMAHotDetail struct {
+	Start          uint64
+	End            uint64
+	Type           string // "heap", "anonymous", "data", "stack", etc.
+	Pathname       string
+	IsHot          bool
+	DirtyPages     int64
+	TotalPages     uint64
+	DirtyRatio     float64
+	ConsecutiveHot int
+}
+
+// getAllVMAs returns all tracked VMAs with their current hot/cold classification.
+func (h *heatClassifier) getAllVMAs() []VMAHotDetail {
+	result := make([]VMAHotDetail, 0, len(h.states))
+	for _, state := range h.states {
+		var ratio float64
+		if state.Count > 0 {
+			idx := (state.Head - 1 + windowSize) % windowSize
+			ratio = state.Ratios[idx]
+		}
+		result = append(result, VMAHotDetail{
+			Start:          state.Start,
+			End:            state.End,
+			Type:           state.VMAType.String(),
+			Pathname:       state.Pathname,
+			IsHot:          state.IsHot,
+			DirtyPages:     state.LastDirty,
+			TotalPages:     state.LastTotal,
+			DirtyRatio:     ratio,
+			ConsecutiveHot: state.ConsecutiveHot,
+		})
+	}
+	return result
 }
 
 // hotVMAs returns the number of hot VMAs.

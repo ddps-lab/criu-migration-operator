@@ -136,6 +136,26 @@ const (
 	VMAUnknown
 )
 
+// String returns the string representation of a VMAType.
+func (t VMAType) String() string {
+	switch t {
+	case VMAHeap:
+		return "heap"
+	case VMAStack:
+		return "stack"
+	case VMAAnonymous:
+		return "anonymous"
+	case VMACode:
+		return "code"
+	case VMAData:
+		return "data"
+	case VMAVDSO:
+		return "vdso"
+	default:
+		return "unknown"
+	}
+}
+
 // VMAInfo represents a parsed VMA entry from /proc/pid/maps
 type VMAInfo struct {
 	Start    uint64

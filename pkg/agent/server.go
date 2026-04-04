@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net"
@@ -271,6 +272,17 @@ func (a *Agent) FinalDump(ctx context.Context, req *pb.FinalDumpRequest) (*pb.Fi
 	if err != nil {
 		pageServerCancel()
 		return nil, fmt.Errorf("final dump failed: %w", err)
+	}
+
+	// Save hot VMA metadata alongside checkpoint for restore-side prefetch priority
+	if a.profilerInst != nil {
+		vmaDetails := a.profilerInst.GetVMADetails()
+		dumpDir := filepath.Join(a.checkpointMgr.workDir, result.DumpID)
+		if err := saveVMAMetadata(dumpDir, vmaDetails); err != nil {
+			log.Printf("Warning: failed to save VMA metadata: %v", err)
+		} else {
+			log.Printf("Saved VMA metadata (%d VMAs) to %s", len(vmaDetails), dumpDir)
+		}
 	}
 
 	// Store page-server process in Agent to keep it alive
@@ -634,11 +646,29 @@ func (a *Agent) GetHotRegions(ctx context.Context, req *pb.GetHotRegionsRequest)
 		}
 	}
 
+	// Add full VMA details (hot + cold)
+	vmaDetails := a.profilerInst.GetVMADetails()
+	protoVMADetails := make([]*pb.VMAHotInfo, len(vmaDetails))
+	for i, v := range vmaDetails {
+		protoVMADetails[i] = &pb.VMAHotInfo{
+			StartAddr:      v.Start,
+			EndAddr:        v.End,
+			Type:           v.Type,
+			Pathname:       v.Pathname,
+			IsHot:          v.IsHot,
+			DirtyPages:     v.DirtyPages,
+			TotalPages:     int64(v.TotalPages),
+			DirtyRatio:     v.DirtyRatio,
+			ConsecutiveHot: int32(v.ConsecutiveHot),
+		}
+	}
+
 	return &pb.GetHotRegionsResponse{
 		Regions:     protoRegions,
 		TimestampMs: time.Now().UnixMilli(),
 		TotalVmas:   int32(totalVMAs),
 		HotVmas:     int32(hotVMAs),
+		VmaDetails:  protoVMADetails,
 	}, nil
 }
 
@@ -954,4 +984,45 @@ func extractAnnotation(annotations, key string) string {
 	value = strings.ReplaceAll(value, "\\\\", "\\")
 
 	return value
+}
+
+// vmaMetadataEntry is the JSON format for per-VMA hot/cold metadata saved with checkpoints.
+type vmaMetadataEntry struct {
+	Start          uint64  `json:"start"`
+	End            uint64  `json:"end"`
+	Type           string  `json:"type"`
+	Pathname       string  `json:"pathname,omitempty"`
+	IsHot          bool    `json:"is_hot"`
+	DirtyPages     int64   `json:"dirty_pages"`
+	TotalPages     uint64  `json:"total_pages"`
+	DirtyRatio     float64 `json:"dirty_ratio"`
+	ConsecutiveHot int     `json:"consecutive_hot"`
+}
+
+// saveVMAMetadata writes hot VMA classification data as JSON alongside checkpoint images.
+// This metadata is uploaded to storage with the checkpoint and can be used by
+// restore-side prefetch to prioritize hot memory regions.
+func saveVMAMetadata(dumpDir string, details []profiler.VMAHotDetail) error {
+	entries := make([]vmaMetadataEntry, len(details))
+	for i, v := range details {
+		entries[i] = vmaMetadataEntry{
+			Start:          v.Start,
+			End:            v.End,
+			Type:           v.Type,
+			Pathname:       v.Pathname,
+			IsHot:          v.IsHot,
+			DirtyPages:     v.DirtyPages,
+			TotalPages:     v.TotalPages,
+			DirtyRatio:     v.DirtyRatio,
+			ConsecutiveHot: v.ConsecutiveHot,
+		}
+	}
+
+	data, err := json.MarshalIndent(entries, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal VMA metadata: %w", err)
+	}
+
+	path := filepath.Join(dumpDir, "hot_vma_metadata.json")
+	return os.WriteFile(path, data, 0644)
 }

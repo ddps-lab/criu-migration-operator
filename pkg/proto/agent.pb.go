@@ -1151,11 +1151,13 @@ func (*GetHotRegionsRequest) Descriptor() ([]byte, []int) {
 
 // GetHotRegionsResponse contains the current hot memory regions
 type GetHotRegionsResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Regions       []*HotRegionProto      `protobuf:"bytes,1,rep,name=regions,proto3" json:"regions,omitempty"`
-	TimestampMs   int64                  `protobuf:"varint,2,opt,name=timestamp_ms,json=timestampMs,proto3" json:"timestamp_ms,omitempty"`
-	TotalVmas     int32                  `protobuf:"varint,3,opt,name=total_vmas,json=totalVmas,proto3" json:"total_vmas,omitempty"`
-	HotVmas       int32                  `protobuf:"varint,4,opt,name=hot_vmas,json=hotVmas,proto3" json:"hot_vmas,omitempty"`
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Regions     []*HotRegionProto      `protobuf:"bytes,1,rep,name=regions,proto3" json:"regions,omitempty"`
+	TimestampMs int64                  `protobuf:"varint,2,opt,name=timestamp_ms,json=timestampMs,proto3" json:"timestamp_ms,omitempty"`
+	TotalVmas   int32                  `protobuf:"varint,3,opt,name=total_vmas,json=totalVmas,proto3" json:"total_vmas,omitempty"`
+	HotVmas     int32                  `protobuf:"varint,4,opt,name=hot_vmas,json=hotVmas,proto3" json:"hot_vmas,omitempty"`
+	// Full VMA details (hot + cold) for checkpoint metadata and prefetch priority
+	VmaDetails    []*VMAHotInfo `protobuf:"bytes,5,rep,name=vma_details,json=vmaDetails,proto3" json:"vma_details,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1216,6 +1218,13 @@ func (x *GetHotRegionsResponse) GetHotVmas() int32 {
 		return x.HotVmas
 	}
 	return 0
+}
+
+func (x *GetHotRegionsResponse) GetVmaDetails() []*VMAHotInfo {
+	if x != nil {
+		return x.VmaDetails
+	}
+	return nil
 }
 
 // HotRegionProto represents a hot memory region
@@ -1287,6 +1296,115 @@ func (x *HotRegionProto) GetConsecutiveHot() int32 {
 	return 0
 }
 
+// VMAHotInfo contains per-VMA hot/cold classification with dirty stats
+type VMAHotInfo struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	StartAddr      uint64                 `protobuf:"varint,1,opt,name=start_addr,json=startAddr,proto3" json:"start_addr,omitempty"`
+	EndAddr        uint64                 `protobuf:"varint,2,opt,name=end_addr,json=endAddr,proto3" json:"end_addr,omitempty"`
+	Type           string                 `protobuf:"bytes,3,opt,name=type,proto3" json:"type,omitempty"` // "heap", "anonymous", "data", "stack", etc.
+	Pathname       string                 `protobuf:"bytes,4,opt,name=pathname,proto3" json:"pathname,omitempty"`
+	IsHot          bool                   `protobuf:"varint,5,opt,name=is_hot,json=isHot,proto3" json:"is_hot,omitempty"`
+	DirtyPages     int64                  `protobuf:"varint,6,opt,name=dirty_pages,json=dirtyPages,proto3" json:"dirty_pages,omitempty"`
+	TotalPages     int64                  `protobuf:"varint,7,opt,name=total_pages,json=totalPages,proto3" json:"total_pages,omitempty"`
+	DirtyRatio     float64                `protobuf:"fixed64,8,opt,name=dirty_ratio,json=dirtyRatio,proto3" json:"dirty_ratio,omitempty"`
+	ConsecutiveHot int32                  `protobuf:"varint,9,opt,name=consecutive_hot,json=consecutiveHot,proto3" json:"consecutive_hot,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *VMAHotInfo) Reset() {
+	*x = VMAHotInfo{}
+	mi := &file_pkg_proto_agent_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *VMAHotInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*VMAHotInfo) ProtoMessage() {}
+
+func (x *VMAHotInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_pkg_proto_agent_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use VMAHotInfo.ProtoReflect.Descriptor instead.
+func (*VMAHotInfo) Descriptor() ([]byte, []int) {
+	return file_pkg_proto_agent_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *VMAHotInfo) GetStartAddr() uint64 {
+	if x != nil {
+		return x.StartAddr
+	}
+	return 0
+}
+
+func (x *VMAHotInfo) GetEndAddr() uint64 {
+	if x != nil {
+		return x.EndAddr
+	}
+	return 0
+}
+
+func (x *VMAHotInfo) GetType() string {
+	if x != nil {
+		return x.Type
+	}
+	return ""
+}
+
+func (x *VMAHotInfo) GetPathname() string {
+	if x != nil {
+		return x.Pathname
+	}
+	return ""
+}
+
+func (x *VMAHotInfo) GetIsHot() bool {
+	if x != nil {
+		return x.IsHot
+	}
+	return false
+}
+
+func (x *VMAHotInfo) GetDirtyPages() int64 {
+	if x != nil {
+		return x.DirtyPages
+	}
+	return 0
+}
+
+func (x *VMAHotInfo) GetTotalPages() int64 {
+	if x != nil {
+		return x.TotalPages
+	}
+	return 0
+}
+
+func (x *VMAHotInfo) GetDirtyRatio() float64 {
+	if x != nil {
+		return x.DirtyRatio
+	}
+	return 0
+}
+
+func (x *VMAHotInfo) GetConsecutiveHot() int32 {
+	if x != nil {
+		return x.ConsecutiveHot
+	}
+	return 0
+}
+
 // GetDirtyVolumeRequest is empty
 type GetDirtyVolumeRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1296,7 +1414,7 @@ type GetDirtyVolumeRequest struct {
 
 func (x *GetDirtyVolumeRequest) Reset() {
 	*x = GetDirtyVolumeRequest{}
-	mi := &file_pkg_proto_agent_proto_msgTypes[19]
+	mi := &file_pkg_proto_agent_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1308,7 +1426,7 @@ func (x *GetDirtyVolumeRequest) String() string {
 func (*GetDirtyVolumeRequest) ProtoMessage() {}
 
 func (x *GetDirtyVolumeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_proto_agent_proto_msgTypes[19]
+	mi := &file_pkg_proto_agent_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1321,7 +1439,7 @@ func (x *GetDirtyVolumeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetDirtyVolumeRequest.ProtoReflect.Descriptor instead.
 func (*GetDirtyVolumeRequest) Descriptor() ([]byte, []int) {
-	return file_pkg_proto_agent_proto_rawDescGZIP(), []int{19}
+	return file_pkg_proto_agent_proto_rawDescGZIP(), []int{20}
 }
 
 // GetDirtyVolumeResponse contains current dirty page statistics
@@ -1339,7 +1457,7 @@ type GetDirtyVolumeResponse struct {
 
 func (x *GetDirtyVolumeResponse) Reset() {
 	*x = GetDirtyVolumeResponse{}
-	mi := &file_pkg_proto_agent_proto_msgTypes[20]
+	mi := &file_pkg_proto_agent_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1351,7 +1469,7 @@ func (x *GetDirtyVolumeResponse) String() string {
 func (*GetDirtyVolumeResponse) ProtoMessage() {}
 
 func (x *GetDirtyVolumeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_pkg_proto_agent_proto_msgTypes[20]
+	mi := &file_pkg_proto_agent_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1364,7 +1482,7 @@ func (x *GetDirtyVolumeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetDirtyVolumeResponse.ProtoReflect.Descriptor instead.
 func (*GetDirtyVolumeResponse) Descriptor() ([]byte, []int) {
-	return file_pkg_proto_agent_proto_rawDescGZIP(), []int{20}
+	return file_pkg_proto_agent_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *GetDirtyVolumeResponse) GetDirtyPages() int64 {
@@ -1505,19 +1623,36 @@ const file_pkg_proto_agent_proto_rawDesc = "" +
 	"\x14StopProfilingRequest\"1\n" +
 	"\x15StopProfilingResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\"\x16\n" +
-	"\x14GetHotRegionsRequest\"\xa5\x01\n" +
+	"\x14GetHotRegionsRequest\"\xd9\x01\n" +
 	"\x15GetHotRegionsResponse\x12/\n" +
 	"\aregions\x18\x01 \x03(\v2\x15.agent.HotRegionProtoR\aregions\x12!\n" +
 	"\ftimestamp_ms\x18\x02 \x01(\x03R\vtimestampMs\x12\x1d\n" +
 	"\n" +
 	"total_vmas\x18\x03 \x01(\x05R\ttotalVmas\x12\x19\n" +
-	"\bhot_vmas\x18\x04 \x01(\x05R\ahotVmas\"\x98\x01\n" +
+	"\bhot_vmas\x18\x04 \x01(\x05R\ahotVmas\x122\n" +
+	"\vvma_details\x18\x05 \x03(\v2\x11.agent.VMAHotInfoR\n" +
+	"vmaDetails\"\x98\x01\n" +
 	"\x0eHotRegionProto\x12\x1d\n" +
 	"\n" +
 	"start_addr\x18\x01 \x01(\x04R\tstartAddr\x12\x19\n" +
 	"\bend_addr\x18\x02 \x01(\x04R\aendAddr\x12#\n" +
 	"\rwritten_ratio\x18\x03 \x01(\x01R\fwrittenRatio\x12'\n" +
-	"\x0fconsecutive_hot\x18\x04 \x01(\x05R\x0econsecutiveHot\"\x17\n" +
+	"\x0fconsecutive_hot\x18\x04 \x01(\x05R\x0econsecutiveHot\"\x99\x02\n" +
+	"\n" +
+	"VMAHotInfo\x12\x1d\n" +
+	"\n" +
+	"start_addr\x18\x01 \x01(\x04R\tstartAddr\x12\x19\n" +
+	"\bend_addr\x18\x02 \x01(\x04R\aendAddr\x12\x12\n" +
+	"\x04type\x18\x03 \x01(\tR\x04type\x12\x1a\n" +
+	"\bpathname\x18\x04 \x01(\tR\bpathname\x12\x15\n" +
+	"\x06is_hot\x18\x05 \x01(\bR\x05isHot\x12\x1f\n" +
+	"\vdirty_pages\x18\x06 \x01(\x03R\n" +
+	"dirtyPages\x12\x1f\n" +
+	"\vtotal_pages\x18\a \x01(\x03R\n" +
+	"totalPages\x12\x1f\n" +
+	"\vdirty_ratio\x18\b \x01(\x01R\n" +
+	"dirtyRatio\x12'\n" +
+	"\x0fconsecutive_hot\x18\t \x01(\x05R\x0econsecutiveHot\"\x17\n" +
 	"\x15GetDirtyVolumeRequest\"\x91\x02\n" +
 	"\x16GetDirtyVolumeResponse\x12\x1f\n" +
 	"\vdirty_pages\x18\x01 \x01(\x03R\n" +
@@ -1552,7 +1687,7 @@ func file_pkg_proto_agent_proto_rawDescGZIP() []byte {
 	return file_pkg_proto_agent_proto_rawDescData
 }
 
-var file_pkg_proto_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
+var file_pkg_proto_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 26)
 var file_pkg_proto_agent_proto_goTypes = []any{
 	(*PreCheckpointRequest)(nil),     // 0: agent.PreCheckpointRequest
 	(*PreCheckpointResponse)(nil),    // 1: agent.PreCheckpointResponse
@@ -1573,44 +1708,46 @@ var file_pkg_proto_agent_proto_goTypes = []any{
 	(*GetHotRegionsRequest)(nil),     // 16: agent.GetHotRegionsRequest
 	(*GetHotRegionsResponse)(nil),    // 17: agent.GetHotRegionsResponse
 	(*HotRegionProto)(nil),           // 18: agent.HotRegionProto
-	(*GetDirtyVolumeRequest)(nil),    // 19: agent.GetDirtyVolumeRequest
-	(*GetDirtyVolumeResponse)(nil),   // 20: agent.GetDirtyVolumeResponse
-	nil,                              // 21: agent.FinalDumpResponse.ExternalMountsEntry
-	nil,                              // 22: agent.FinalDumpResponse.PipeInodesEntry
-	nil,                              // 23: agent.RestoreRequest.ExternalMountsEntry
-	nil,                              // 24: agent.RestoreRequest.PipeInodesEntry
+	(*VMAHotInfo)(nil),               // 19: agent.VMAHotInfo
+	(*GetDirtyVolumeRequest)(nil),    // 20: agent.GetDirtyVolumeRequest
+	(*GetDirtyVolumeResponse)(nil),   // 21: agent.GetDirtyVolumeResponse
+	nil,                              // 22: agent.FinalDumpResponse.ExternalMountsEntry
+	nil,                              // 23: agent.FinalDumpResponse.PipeInodesEntry
+	nil,                              // 24: agent.RestoreRequest.ExternalMountsEntry
+	nil,                              // 25: agent.RestoreRequest.PipeInodesEntry
 }
 var file_pkg_proto_agent_proto_depIdxs = []int32{
-	21, // 0: agent.FinalDumpResponse.external_mounts:type_name -> agent.FinalDumpResponse.ExternalMountsEntry
-	22, // 1: agent.FinalDumpResponse.pipe_inodes:type_name -> agent.FinalDumpResponse.PipeInodesEntry
-	23, // 2: agent.RestoreRequest.external_mounts:type_name -> agent.RestoreRequest.ExternalMountsEntry
-	24, // 3: agent.RestoreRequest.pipe_inodes:type_name -> agent.RestoreRequest.PipeInodesEntry
+	22, // 0: agent.FinalDumpResponse.external_mounts:type_name -> agent.FinalDumpResponse.ExternalMountsEntry
+	23, // 1: agent.FinalDumpResponse.pipe_inodes:type_name -> agent.FinalDumpResponse.PipeInodesEntry
+	24, // 2: agent.RestoreRequest.external_mounts:type_name -> agent.RestoreRequest.ExternalMountsEntry
+	25, // 3: agent.RestoreRequest.pipe_inodes:type_name -> agent.RestoreRequest.PipeInodesEntry
 	18, // 4: agent.GetHotRegionsResponse.regions:type_name -> agent.HotRegionProto
-	0,  // 5: agent.CRIUAgent.PreCheckpoint:input_type -> agent.PreCheckpointRequest
-	2,  // 6: agent.CRIUAgent.FinalDump:input_type -> agent.FinalDumpRequest
-	4,  // 7: agent.CRIUAgent.Restore:input_type -> agent.RestoreRequest
-	6,  // 8: agent.CRIUAgent.GetStatus:input_type -> agent.StatusRequest
-	8,  // 9: agent.CRIUAgent.StartPageServer:input_type -> agent.PageServerRequest
-	10, // 10: agent.CRIUAgent.CheckPageServerStatus:input_type -> agent.PageServerStatusRequest
-	12, // 11: agent.CRIUAgent.StartProfiling:input_type -> agent.StartProfilingRequest
-	14, // 12: agent.CRIUAgent.StopProfiling:input_type -> agent.StopProfilingRequest
-	16, // 13: agent.CRIUAgent.GetHotRegions:input_type -> agent.GetHotRegionsRequest
-	19, // 14: agent.CRIUAgent.GetDirtyVolume:input_type -> agent.GetDirtyVolumeRequest
-	1,  // 15: agent.CRIUAgent.PreCheckpoint:output_type -> agent.PreCheckpointResponse
-	3,  // 16: agent.CRIUAgent.FinalDump:output_type -> agent.FinalDumpResponse
-	5,  // 17: agent.CRIUAgent.Restore:output_type -> agent.RestoreResponse
-	7,  // 18: agent.CRIUAgent.GetStatus:output_type -> agent.StatusResponse
-	9,  // 19: agent.CRIUAgent.StartPageServer:output_type -> agent.PageServerResponse
-	11, // 20: agent.CRIUAgent.CheckPageServerStatus:output_type -> agent.PageServerStatusResponse
-	13, // 21: agent.CRIUAgent.StartProfiling:output_type -> agent.StartProfilingResponse
-	15, // 22: agent.CRIUAgent.StopProfiling:output_type -> agent.StopProfilingResponse
-	17, // 23: agent.CRIUAgent.GetHotRegions:output_type -> agent.GetHotRegionsResponse
-	20, // 24: agent.CRIUAgent.GetDirtyVolume:output_type -> agent.GetDirtyVolumeResponse
-	15, // [15:25] is the sub-list for method output_type
-	5,  // [5:15] is the sub-list for method input_type
-	5,  // [5:5] is the sub-list for extension type_name
-	5,  // [5:5] is the sub-list for extension extendee
-	0,  // [0:5] is the sub-list for field type_name
+	19, // 5: agent.GetHotRegionsResponse.vma_details:type_name -> agent.VMAHotInfo
+	0,  // 6: agent.CRIUAgent.PreCheckpoint:input_type -> agent.PreCheckpointRequest
+	2,  // 7: agent.CRIUAgent.FinalDump:input_type -> agent.FinalDumpRequest
+	4,  // 8: agent.CRIUAgent.Restore:input_type -> agent.RestoreRequest
+	6,  // 9: agent.CRIUAgent.GetStatus:input_type -> agent.StatusRequest
+	8,  // 10: agent.CRIUAgent.StartPageServer:input_type -> agent.PageServerRequest
+	10, // 11: agent.CRIUAgent.CheckPageServerStatus:input_type -> agent.PageServerStatusRequest
+	12, // 12: agent.CRIUAgent.StartProfiling:input_type -> agent.StartProfilingRequest
+	14, // 13: agent.CRIUAgent.StopProfiling:input_type -> agent.StopProfilingRequest
+	16, // 14: agent.CRIUAgent.GetHotRegions:input_type -> agent.GetHotRegionsRequest
+	20, // 15: agent.CRIUAgent.GetDirtyVolume:input_type -> agent.GetDirtyVolumeRequest
+	1,  // 16: agent.CRIUAgent.PreCheckpoint:output_type -> agent.PreCheckpointResponse
+	3,  // 17: agent.CRIUAgent.FinalDump:output_type -> agent.FinalDumpResponse
+	5,  // 18: agent.CRIUAgent.Restore:output_type -> agent.RestoreResponse
+	7,  // 19: agent.CRIUAgent.GetStatus:output_type -> agent.StatusResponse
+	9,  // 20: agent.CRIUAgent.StartPageServer:output_type -> agent.PageServerResponse
+	11, // 21: agent.CRIUAgent.CheckPageServerStatus:output_type -> agent.PageServerStatusResponse
+	13, // 22: agent.CRIUAgent.StartProfiling:output_type -> agent.StartProfilingResponse
+	15, // 23: agent.CRIUAgent.StopProfiling:output_type -> agent.StopProfilingResponse
+	17, // 24: agent.CRIUAgent.GetHotRegions:output_type -> agent.GetHotRegionsResponse
+	21, // 25: agent.CRIUAgent.GetDirtyVolume:output_type -> agent.GetDirtyVolumeResponse
+	16, // [16:26] is the sub-list for method output_type
+	6,  // [6:16] is the sub-list for method input_type
+	6,  // [6:6] is the sub-list for extension type_name
+	6,  // [6:6] is the sub-list for extension extendee
+	0,  // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_pkg_proto_agent_proto_init() }
@@ -1624,7 +1761,7 @@ func file_pkg_proto_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_pkg_proto_agent_proto_rawDesc), len(file_pkg_proto_agent_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   25,
+			NumMessages:   26,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
