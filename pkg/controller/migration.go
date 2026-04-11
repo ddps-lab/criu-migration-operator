@@ -60,7 +60,7 @@ func (r *MigratableAppReconciler) performMigration(
 
 	targetPod := builder.BuildRestorePod(newGeneration, lastCheckpointID, sourcePod.Spec.NodeName, s3Prefix, sourcePod.Status.PodIP)
 
-	logger.Info("Creating target pod", "pod", targetPod.Name)
+	logger.Info("Creating target pod", "generateName", targetPod.GenerateName)
 	if err := r.Create(ctx, targetPod); err != nil {
 		logger.Error(err, "Failed to create target pod")
 		return r.handleMigrationFailure(ctx, mapp, sourcePod, "TargetPodCreationFailed", err.Error())

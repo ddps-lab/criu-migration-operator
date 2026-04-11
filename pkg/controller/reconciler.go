@@ -14,9 +14,12 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
 // MigratableAppReconciler reconciles a MigratableApp object
@@ -752,5 +755,24 @@ func (r *MigratableAppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&migrationv1alpha1.MigratableApp{}).
 		Owns(&corev1.Pod{}).
+		// Watch pods with migration.io/app label (for webhook-managed pods not owned by MigratableApp)
+		Watches(&corev1.Pod{}, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, obj client.Object) []reconcile.Request {
+				pod, ok := obj.(*corev1.Pod)
+				if !ok {
+					return nil
+				}
+				appName := pod.Labels["migration.io/app"]
+				if appName == "" {
+					return nil
+				}
+				return []reconcile.Request{{
+					NamespacedName: types.NamespacedName{
+						Name:      appName,
+						Namespace: pod.Namespace,
+					},
+				}}
+			},
+		)).
 		Complete(r)
 }

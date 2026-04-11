@@ -82,16 +82,21 @@ func EnsureMigratableApp(ctx context.Context, c client.Client, pod *corev1.Pod, 
 // for storage in the MigratableApp template.
 func buildOriginalPodSpec(pod *corev1.Pod) corev1.PodSpec {
 	spec := corev1.PodSpec{}
-	// Copy containers, stripping Kubernetes auto-injected volumeMounts
+	// Copy containers, stripping all Kubernetes/webhook auto-injected artifacts
 	for _, c := range pod.Spec.Containers {
 		if c.Name == "criu-agent" {
 			continue
 		}
 		clean := c.DeepCopy()
-		// Remove auto-injected volumeMounts (kube-api-access-*)
+		// Remove auto-injected volumeMounts
 		var filtered []corev1.VolumeMount
 		for _, vm := range clean.VolumeMounts {
+			// Skip Kubernetes service account mount
 			if strings.HasPrefix(vm.Name, "kube-api-access-") {
+				continue
+			}
+			// Skip webhook-injected checkpoints mount
+			if vm.Name == "checkpoints" {
 				continue
 			}
 			filtered = append(filtered, vm)
@@ -99,6 +104,8 @@ func buildOriginalPodSpec(pod *corev1.Pod) corev1.PodSpec {
 		clean.VolumeMounts = filtered
 		spec.Containers = append(spec.Containers, *clean)
 	}
+	// Don't copy volumes (Kubernetes auto-adds kube-api-access, webhook adds checkpoints/podinfo)
+	// buildBasePod will add the necessary volumes fresh
 	return spec
 }
 

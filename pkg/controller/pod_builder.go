@@ -144,12 +144,6 @@ func (b *PodBuilder) buildBasePod(generation int, mode string) *corev1.Pod {
 	// Start with template
 	template := b.mapp.Spec.Template.DeepCopy()
 
-	// Generate pod name
-	podName := b.mapp.Name
-	if generation > 0 {
-		podName = fmt.Sprintf("%s-gen%d", b.mapp.Name, generation)
-	}
-
 	// Build labels
 	labels := make(map[string]string)
 	for k, v := range template.Labels {
@@ -165,19 +159,26 @@ func (b *PodBuilder) buildBasePod(generation int, mode string) *corev1.Pod {
 	}
 	annotations["migration.io/generation"] = strconv.Itoa(generation)
 	annotations["migration.io/mode"] = mode
-	annotations["migration.io/app"] = b.mapp.Name // MigratableApp name for S3 path consistency
+	annotations["migration.io/app"] = b.mapp.Name
+
+	// Pod naming: gen0 uses deterministic name, gen1+ uses generateName for collision avoidance
+	objMeta := metav1.ObjectMeta{
+		Namespace:   b.mapp.Namespace,
+		Labels:      labels,
+		Annotations: annotations,
+		OwnerReferences: []metav1.OwnerReference{
+			*metav1.NewControllerRef(b.mapp, migrationv1alpha1.GroupVersion.WithKind("MigratableApp")),
+		},
+	}
+	if generation == 0 {
+		objMeta.Name = b.mapp.Name
+	} else {
+		objMeta.GenerateName = fmt.Sprintf("%s-gen%d-", b.mapp.Name, generation)
+	}
 
 	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:        podName,
-			Namespace:   b.mapp.Namespace,
-			Labels:      labels,
-			Annotations: annotations,
-			OwnerReferences: []metav1.OwnerReference{
-				*metav1.NewControllerRef(b.mapp, migrationv1alpha1.GroupVersion.WithKind("MigratableApp")),
-			},
-		},
-		Spec: template.Spec,
+		ObjectMeta: objMeta,
+		Spec:       template.Spec,
 	}
 
 	// Modify app container (add capabilities and volume mount)
@@ -227,13 +228,20 @@ func (b *PodBuilder) buildBasePod(generation int, mode string) *corev1.Pod {
 			}
 			c.SecurityContext.Capabilities.Add = append(c.SecurityContext.Capabilities.Add, "SYS_PTRACE")
 
-			// Mount checkpoints volume to main container at same path as agent
-			// This is needed because restore with nsenter -m -u -i -n -p (all namespaces)
-			// requires checkpoint files to be accessible in main container's mount namespace
-			c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
-				Name:      "checkpoints",
-				MountPath: "/tmp/.criu-checkpoints",
-			})
+			// Mount checkpoints volume to main container (skip if already present from webhook injection)
+			hasCheckpointsMount := false
+			for _, vm := range c.VolumeMounts {
+				if vm.Name == "checkpoints" {
+					hasCheckpointsMount = true
+					break
+				}
+			}
+			if !hasCheckpointsMount {
+				c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
+					Name:      "checkpoints",
+					MountPath: "/tmp/.criu-checkpoints",
+				})
+			}
 		}
 	}
 
