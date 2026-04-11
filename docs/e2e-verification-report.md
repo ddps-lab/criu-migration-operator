@@ -321,6 +321,113 @@ CRD StorageConfig에서 5-mode ablation 실험 제어:
 | Counter 연속성 | ✅ | 12670→12680 (중단 없음) |
 | Ablation control flags | ✅ | 5-mode CRD 설정 |
 
+## 11. Dirty Volume Invariant Scheduler
+
+논문 Eq.4-5 기반 `T_remain < Deadline` invariant 유지 스케줄러.
+
+### 설정
+
+```yaml
+checkpointPolicy:
+  autoAdjust: true
+  deadlineScheduler:
+    deadlineSeconds: 15    # 테스트용 짧은 deadline
+    bandwidthMBps: 1       # 테스트용 낮은 bandwidth
+    scanIntervalMs: 5000
+    tFreezeMs: 50
+    tMarginMs: 2000
+```
+
+### 로그 (dirty-counter workload, 256MB, 50K writes/10ms)
+
+```
+[INVARIANT-SCHEDULER] Started (deadline=15s, bandwidth=1MB/s, scan=5000ms)
+[INVARIANT-SCHEDULER] Performing initial pre-dump (full writable memory)
+[INVARIANT-SCHEDULER] Initial pre-dump completed: 27eb385e (size=33146 bytes)
+[INVARIANT-SCHEDULER] Profiler started after initial dump (pid=185, vmas=0, hot=0)
+
+T_remain=2050.0ms  D_current=0 pages (0.0MB)      → OK
+T_remain=5874.2ms  D_current=979 pages (3.8MB)     → OK
+T_remain=9698.4ms  D_current=1958 pages (7.6MB)    → OK
+T_remain=13522.7ms D_current=2937 pages (11.5MB)   → OK
+T_remain=17346.9ms D_current=3916 pages (15.3MB)   → VIOLATED!
+
+[INVARIANT-SCHEDULER] INVARIANT VIOLATED: T_remain=17346.9ms >= Deadline=15000ms
+[INVARIANT-SCHEDULER] Pre-dump #2 completed: 7cd99ab2 (size=41830 bytes)
+
+T_remain=2050.0ms  D_current=0 pages (0.0MB)       → RESET! 다시 쌓이기 시작
+T_remain=5874.2ms  D_current=979 pages (3.8MB)     → OK (cycle 반복)
+```
+
+### 핵심 동작
+
+- **Initial pre-dump**: Pod 시작 즉시 전체 writable memory 전송
+- **Profiler**: Initial dump 이후에 시작 (D_current=0에서 깨끗하게 출발)
+- **Invariant 평가**: 5초 주기로 `T_remain = T_freeze + D_current/B_upload + T_margin`
+- **Violation → pre-dump**: D_current 리셋, profiler reinit (CumulativeDirtyBytes=0)
+- **F_op 경고**: 60초 주기로 feasibility score 평가, `F_op < 1` → 경고 로그만
+
+### autoAdjust 분기
+
+| autoAdjust | Controller | Agent |
+|------------|-----------|-------|
+| false | Fixed interval pre-dump | Profiler만 실행 |
+| true | Pre-dump skip (interval 무시) | Invariant scheduler 전담 |
+
+## 12. Webhook Injection (Deployment / StatefulSet / bare Pod)
+
+| 리소스 종류 | Injection | MigratableApp CR | App name 추론 |
+|------------|-----------|------------------|--------------|
+| Deployment (replicas=1) | ✅ 2/2 | ✅ webhook-managed | Deployment name |
+| StatefulSet | ✅ 2/2 | ✅ webhook-managed | StatefulSet name |
+| Bare Pod | ✅ 2/2 | ✅ webhook-managed | Pod name |
+
+**Webhook 로그:**
+```
+[WEBHOOK] Intercepted pod default/test-sts-0 (generateName: test-sts-)
+[WEBHOOK] App name: test-sts, namespace: default
+[WEBHOOK] Created MigratableApp default/test-sts for pod injection
+
+[WEBHOOK] Intercepted pod default/test-bare-pod (generateName: )
+[WEBHOOK] App name: test-bare-pod, namespace: default
+[WEBHOOK] Created MigratableApp default/test-bare-pod for pod injection
+```
+
+**ConfigMap reference:**
+```yaml
+annotations:
+  migration.io/enabled: "true"
+  migration.io/config: "migration-defaults"  # ConfigMap 이름
+```
+
+## 전체 기능 검증 요약 (Updated)
+
+| 기능 | 상태 | 비고 |
+|------|------|------|
+| S3 direct upload | ✅ | Pre-dump + Final dump |
+| Path-style S3 URL (MinIO) | ✅ | `--object-storage-path-style` |
+| Write profiler auto-start | ✅ | uffd-wp, θ=0.3, N=3, 5s |
+| Profiler cleanup/reinit | ✅ | CRIU dump 전후 lifecycle |
+| Hot VMA exclude + hot-vmas.json | ✅ | Pre-dump + lazy-pages seeding |
+| Async prefetch (4 workers) | ✅ | S3 parallel fetch |
+| Incremental pre-dump chain | ✅ | Chain depth 1→2→3 |
+| Per-fault metrics | ✅ | stall, source, pages per fault |
+| Log upload | ✅ | Pre-dump: 2개, Restore: 5개 |
+| Network bandwidth auto-detect | ✅ | AWS API / NIC speed |
+| Dirty volume invariant scheduler | ✅ | T_remain >= Deadline → pre-dump |
+| D_current reset after pre-dump | ✅ | CumulativeDirtyBytes=0 |
+| F_op 경고 (read-only) | ✅ | F_op < 1 → log warning |
+| Spot interrupt (mock IMDS) | ✅ | 1초 polling, 2초 내 감지 |
+| Migration E2E | ✅ | worker2→worker1, 573ms restore |
+| Webhook: Deployment | ✅ | annotation → sidecar + CR |
+| Webhook: StatefulSet | ✅ | annotation → sidecar + CR |
+| Webhook: bare Pod | ✅ | annotation → sidecar + CR |
+| Webhook: ConfigMap reference | ✅ | `migration.io/config` |
+| Webhook-managed migration | ✅ | Pod watch + generateName |
+| Ablation control flags | ✅ | 5-mode CRD 설정 |
+| autoAdjust=true → controller skip | ✅ | Agent 전담 |
+| autoAdjust=false → interval | ✅ | Controller 고정 주기 |
+
 ## S3 데이터 구조 (실험 수집용)
 
 ```

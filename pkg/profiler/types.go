@@ -205,12 +205,12 @@ type HotRegion struct {
 
 // DirtyVolume represents the current dirty page statistics
 type DirtyVolume struct {
-	DirtyPages           int64
-	DirtyBytes           int64
-	DirtyRatePerSec      float64
-	CumulativeDirtyBytes int64
-	AvgDirtyRate         float64
-	TimestampMs          int64
+	DirtyPages           int64   // dirty pages in last scan interval
+	DirtyBytes           int64   // dirty bytes in last scan interval (DirtyPages * 4096)
+	DirtyRatePerSec      float64 // bytes per second (not pages) in last scan interval
+	CumulativeDirtyBytes int64   // total dirty bytes since last ReinitAfterCRIU
+	AvgDirtyRate         float64 // bytes per second average since profiler start
+	TimestampMs          int64   // unix milliseconds of last update
 }
 
 // AddrRange represents an address range for CRIU exclude args

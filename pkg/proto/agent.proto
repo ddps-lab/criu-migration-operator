@@ -291,7 +291,7 @@ message GetDirtyVolumeRequest {}
 message GetDirtyVolumeResponse {
   int64 dirty_pages = 1;
   int64 dirty_bytes = 2;
-  double dirty_rate_pages_per_sec = 3;
+  double dirty_rate_pages_per_sec = 3; // DEPRECATED name: actual value is bytes/sec (not pages/sec)
   int64 cumulative_dirty_bytes = 4;
   double avg_dirty_rate = 5;
   int64 timestamp_ms = 6;

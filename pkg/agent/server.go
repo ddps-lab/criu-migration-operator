@@ -814,7 +814,7 @@ func (a *Agent) GetDirtyVolume(ctx context.Context, req *pb.GetDirtyVolumeReques
 	return &pb.GetDirtyVolumeResponse{
 		DirtyPages:           dv.DirtyPages,
 		DirtyBytes:           dv.DirtyBytes,
-		DirtyRatePagesPerSec: dv.DirtyRatePerSec,
+		DirtyRatePagesPerSec: dv.DirtyRatePerSec, // NOTE: value is bytes/sec despite field name
 		CumulativeDirtyBytes: dv.CumulativeDirtyBytes,
 		AvgDirtyRate:         dv.AvgDirtyRate,
 		TimestampMs:          dv.TimestampMs,

@@ -368,61 +368,6 @@ func shouldPerformCheckpoint(mapp *migrationv1alpha1.MigratableApp) bool {
 	return elapsed >= interval
 }
 
-// shouldPerformCheckpointAdaptive extends shouldPerformCheckpoint with
-// dirty volume awareness. Returns (should checkpoint, reason).
-//
-// Adaptive logic (from paper's Feasibility Score model):
-// - If cumulative dirty since last checkpoint > memoryThresholdMB → checkpoint now
-// - If dirty rate is low (< 10 pages/s) → extend interval (skip this cycle)
-// - If dirty rate is high and approaching threshold → checkpoint early
-func shouldPerformCheckpointAdaptive(
-	mapp *migrationv1alpha1.MigratableApp,
-	dirtyBytes int64,
-	dirtyRate float64,
-) (bool, string) {
-	// Fallback to time-based if autoAdjust not enabled
-	if !mapp.Spec.CheckpointPolicy.AutoAdjust {
-		if shouldPerformCheckpoint(mapp) {
-			return true, "interval"
-		}
-		return false, ""
-	}
-
-	// Always checkpoint if never done before
-	if mapp.Status.CheckpointStatus.LastCheckpointTime.IsZero() {
-		return true, "initial"
-	}
-
-	thresholdBytes := int64(mapp.Spec.CheckpointPolicy.MemoryThresholdMB) * 1024 * 1024
-	if thresholdBytes <= 0 {
-		thresholdBytes = 50 * 1024 * 1024 // default 50MB
-	}
-
-	// Check if dirty volume exceeds threshold
-	if dirtyBytes > thresholdBytes {
-		return true, fmt.Sprintf("dirty_threshold(%dMB>%dMB)",
-			dirtyBytes/1024/1024, thresholdBytes/1024/1024)
-	}
-
-	// If dirty rate is very low, skip this cycle (extend interval)
-	// This avoids unnecessary checkpoints when workload is idle
-	if dirtyRate < 10 { // < 10 pages/sec (~40KB/s)
-		return false, ""
-	}
-
-	// Time-based fallback: respect max interval even with autoAdjust
-	interval, err := time.ParseDuration(mapp.Spec.CheckpointPolicy.Interval)
-	if err != nil || interval == 0 {
-		interval = 30 * time.Second
-	}
-	elapsed := time.Since(mapp.Status.CheckpointStatus.LastCheckpointTime.Time)
-	if elapsed >= interval {
-		return true, "interval"
-	}
-
-	return false, ""
-}
-
 // performPreCheckpoint performs a pre-checkpoint on the running pod
 func (r *MigratableAppReconciler) performPreCheckpoint(ctx context.Context, mapp *migrationv1alpha1.MigratableApp, pod *corev1.Pod) error {
 	logger := log.FromContext(ctx)
