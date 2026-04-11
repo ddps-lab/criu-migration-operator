@@ -253,6 +253,17 @@ func (p *Profiler) Close() {
 
 // CleanupBeforeCRIU stops the profiling loop and unregisters all VMAs from uffd.
 // The uffd fd is kept open so ReinitAfterCRIU can re-register without ptrace.
+//
+// Multi-process safety: uffd-wp registrations are per-address-space in the kernel.
+// All threads within the same process share the address space and thus the same
+// uffd registrations. Unregistering from the main PID covers all threads.
+// Child processes created via fork() do NOT inherit uffd registrations (the uffd fd
+// is inherited but registrations are per-vm_area_struct). Therefore, cleanup of the
+// main profiled PID is sufficient for the expected single-process container case.
+//
+// The uffd fd itself remains open in the target process. CRIU can checkpoint/restore
+// it because we use O_CLOEXEC. After CRIU restore, ReinitAfterCRIU re-registers VMAs
+// using the tracker-side fd copy (obtained via pidfd_getfd during setup).
 func (p *Profiler) CleanupBeforeCRIU() error {
 	p.Stop()
 

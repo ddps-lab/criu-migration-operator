@@ -143,6 +143,22 @@ func (c *S3Client) uploadFilesParallel(ctx context.Context, baseDir, s3Prefix st
 }
 
 // uploadSingleFile uploads a single file to S3
+// UploadFile uploads a single local file to the given S3 key.
+func (c *S3Client) UploadFile(ctx context.Context, localPath, s3Key string) error {
+	file, err := os.Open(localPath)
+	if err != nil {
+		return fmt.Errorf("failed to open file %s: %w", localPath, err)
+	}
+	defer file.Close()
+
+	_, err = c.uploader.UploadWithContext(ctx, &s3manager.UploadInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(s3Key),
+		Body:   file,
+	})
+	return err
+}
+
 func (c *S3Client) uploadSingleFile(ctx context.Context, baseDir, s3Prefix, filePath string) error {
 	relPath, err := filepath.Rel(baseDir, filePath)
 	if err != nil {
@@ -538,11 +554,7 @@ func (c *S3Client) needsCRIUExpressOneZone() bool {
 }
 
 // getCRIUObjectPrefix returns the object prefix for CRIU commands.
-// For MinIO, bucket is prepended to the prefix (path-style).
 func (c *S3Client) getCRIUObjectPrefix(s3Prefix string) string {
-	if c.isMinIO() {
-		return c.bucket + "/" + s3Prefix + "/"
-	}
 	return s3Prefix + "/"
 }
 
@@ -558,12 +570,19 @@ func (c *S3Client) BuildCRIUObjectStorageArgs(s3Prefix string) []string {
 		"--object-storage-endpoint-url", c.getDownloadEndpoint(),
 	}
 
-	if c.needsBucketOption() {
+	// CloudFront CDN doesn't use bucket; MinIO and standard S3 do
+	isCloudFront := c.downloadEndpoint != "" && c.downloadEndpoint != c.endpoint
+	if !isCloudFront {
 		args = append(args, "--object-storage-bucket", c.bucket)
 	}
 
 	if s3Prefix != "" {
 		args = append(args, "--object-storage-object-prefix", c.getCRIUObjectPrefix(s3Prefix))
+	}
+
+	// Path-style URLs for MinIO (endpoint/bucket/key instead of bucket.endpoint/key)
+	if c.isMinIO() {
+		args = append(args, "--object-storage-path-style")
 	}
 
 	if c.needsCRIUCredentials() {
@@ -583,3 +602,44 @@ func (c *S3Client) BuildCRIUObjectStorageArgs(s3Prefix string) []string {
 
 	return args
 }
+
+// BuildCRIUUploadArgs returns CRIU command-line arguments for --object-storage-upload
+// (dump-side direct S3 upload, zero local disk I/O).
+// Uses the upload endpoint, not the download endpoint.
+func (c *S3Client) BuildCRIUUploadArgs(s3Prefix string) []string {
+	if c == nil {
+		return nil
+	}
+
+	args := []string{
+		"--object-storage-upload",
+		"--object-storage-endpoint-url", c.getEndpoint(),
+		"--object-storage-bucket", c.bucket,
+	}
+
+	if s3Prefix != "" {
+		args = append(args, "--object-storage-object-prefix", c.getCRIUObjectPrefix(s3Prefix))
+	}
+
+	if c.isMinIO() {
+		args = append(args, "--object-storage-path-style")
+	}
+
+	if c.needsCRIUCredentials() {
+		awsAccessKey := os.Getenv("AWS_ACCESS_KEY_ID")
+		awsSecretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
+		if awsAccessKey != "" && awsSecretKey != "" {
+			args = append(args,
+				"--aws-access-key", awsAccessKey,
+				"--aws-secret-key", awsSecretKey,
+				"--aws-region", c.region,
+			)
+		}
+		if c.needsCRIUExpressOneZone() {
+			args = append(args, "--express-one-zone")
+		}
+	}
+
+	return args
+}
+

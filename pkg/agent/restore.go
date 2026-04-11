@@ -98,7 +98,15 @@ func (m *RestoreManager) Restore(ctx context.Context, dumpID, s3Prefix string, u
 		lazyPagesCmd = cmd
 
 		fmt.Printf("[DEBUG] Lazy-pages daemon started with PID: %d\n", pageServerPID)
-		time.Sleep(1 * time.Second)
+
+		// Wait for lazy-pages socket (fast polling instead of fixed sleep)
+		socketPath := filepath.Join(dumpDir, "lazy-pages.socket")
+		for i := 0; i < 50; i++ {
+			if info, err := os.Stat(socketPath); err == nil && info.Mode()&os.ModeSocket != 0 {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
 	}
 
 	// Find main container PID to join its namespaces
@@ -293,9 +301,24 @@ func (m *RestoreManager) StartPageServer(ctx context.Context, port int, checkpoi
 		args = append(args, "--page-server", "--address", sourceAddr, "--port", strconv.Itoa(port))
 	}
 
-	// Add async-prefetch if enabled
+	// Async prefetch configuration
 	if os.Getenv("ASYNC_PREFETCH") == "true" {
 		args = append(args, "--async-prefetch")
+
+		// Prefetch workers (default: CRIU's built-in default of 4)
+		if w := os.Getenv("PREFETCH_WORKERS"); w != "" {
+			args = append(args, "--prefetch-workers", w)
+		}
+
+		// Hot VMA seeding (default: enabled when async-prefetch is on)
+		if os.Getenv("NO_HOT_VMA_SEED") == "true" {
+			args = append(args, "--no-hot-vma-seed")
+		}
+	}
+
+	// Semi-sync IOV (independent of async prefetch — works with object storage)
+	if os.Getenv("NO_SEMI_SYNC_IOV") == "true" {
+		args = append(args, "--no-semi-sync-iov")
 	}
 
 	// Add S3/object storage options for lazy-pages

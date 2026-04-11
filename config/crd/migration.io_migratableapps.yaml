@@ -46,6 +46,30 @@ spec:
                   autoAdjust:
                     default: true
                     type: boolean
+                  deadlineScheduler:
+                    properties:
+                      bandwidthMBps:
+                        default: 100
+                        type: integer
+                      deadlineSeconds:
+                        default: 120
+                        type: integer
+                      dryRun:
+                        default: false
+                        type: boolean
+                      enabled:
+                        default: false
+                        type: boolean
+                      scanIntervalMs:
+                        default: 2000
+                        type: integer
+                      tFreezeMs:
+                        default: 50
+                        type: integer
+                      tMarginMs:
+                        default: 5000
+                        type: integer
+                    type: object
                   interval:
                     default: 30s
                     type: string

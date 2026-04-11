@@ -325,9 +325,33 @@ func (b *PodBuilder) buildAgentContainer(mode string) corev1.Container {
 			Value: strconv.FormatBool(b.mapp.Spec.Storage.AsyncPrefetch),
 		},
 		{
+			Name:  "DIRECT_UPLOAD",
+			Value: strconv.FormatBool(b.mapp.Spec.Storage.DirectUpload),
+		},
+		{
 			Name:  "STORAGE_TYPE",
 			Value: b.mapp.Spec.Storage.Type,
 		},
+	}
+
+	// Prefetch tuning (optional)
+	if b.mapp.Spec.Storage.PrefetchWorkers > 0 {
+		agentEnv = append(agentEnv, corev1.EnvVar{
+			Name:  "PREFETCH_WORKERS",
+			Value: strconv.Itoa(b.mapp.Spec.Storage.PrefetchWorkers),
+		})
+	}
+	if b.mapp.Spec.Storage.SemiSyncIOV != nil && !*b.mapp.Spec.Storage.SemiSyncIOV {
+		agentEnv = append(agentEnv, corev1.EnvVar{
+			Name:  "NO_SEMI_SYNC_IOV",
+			Value: "true",
+		})
+	}
+	if b.mapp.Spec.Storage.HotVMASeed != nil && !*b.mapp.Spec.Storage.HotVMASeed {
+		agentEnv = append(agentEnv, corev1.EnvVar{
+			Name:  "NO_HOT_VMA_SEED",
+			Value: "true",
+		})
 	}
 
 	// Add POD_GENERATION from annotation via Downward API (set in buildBasePod)

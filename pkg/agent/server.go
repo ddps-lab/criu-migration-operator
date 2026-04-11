@@ -277,11 +277,18 @@ func (a *Agent) FinalDump(ctx context.Context, req *pb.FinalDumpRequest) (*pb.Fi
 	// Save hot VMA metadata alongside checkpoint for restore-side prefetch priority
 	if a.profilerInst != nil {
 		vmaDetails := a.profilerInst.GetVMADetails()
+		hotRegions := a.profilerInst.GetHotRegions()
 		dumpDir := filepath.Join(a.checkpointMgr.workDir, result.DumpID)
+
 		if err := saveVMAMetadata(dumpDir, vmaDetails); err != nil {
 			log.Printf("Warning: failed to save VMA metadata: %v", err)
 		} else {
 			log.Printf("Saved VMA metadata (%d VMAs) to %s", len(vmaDetails), dumpDir)
+		}
+
+		// Save CRIU-compatible hot-vmas.json for prefetch seeding
+		if err := saveHotVMAsJSON(dumpDir, hotRegions); err != nil {
+			log.Printf("Warning: failed to save hot-vmas.json: %v", err)
 		}
 	}
 
@@ -436,7 +443,7 @@ func (a *Agent) Restore(ctx context.Context, req *pb.RestoreRequest) (*pb.Restor
 		}
 	}
 
-	// Wait for lazy-pages completion in background, then allow checkpoints again
+	// Wait for lazy-pages completion in background, then collect metrics
 	if needsLazy {
 		go func() {
 			if lazyPagesCmd != nil && lazyPagesCmd.Process != nil {
@@ -444,6 +451,17 @@ func (a *Agent) Restore(ctx context.Context, req *pb.RestoreRequest) (*pb.Restor
 			}
 			a.lazyPagesActive = false
 			log.Printf("[TARGET-AGENT] Lazy-pages completed, checkpoints are now allowed")
+
+			// Parse lazy-pages metrics
+			logPath := filepath.Join(a.restoreMgr.workDir, req.DumpId, "lazy-pages.log")
+			if m, err := ParseLazyPagesLog(logPath); err == nil {
+				log.Printf("[TARGET-AGENT] Lazy-pages metrics: faults=%d (S3=%d cache=%d) stall_avg=%.1fms p50=%.1fms max=%.1fms daemon=%.1fs cache_hit=%.1f%%",
+					m.TotalFaults, m.S3Faults, m.CacheFaults,
+					m.StallAvg, m.StallP50, m.StallMax,
+					m.DaemonDurationS, m.CacheHitRate)
+			} else {
+				log.Printf("[TARGET-AGENT] Warning: failed to parse lazy-pages metrics: %v", err)
+			}
 		}()
 	}
 
@@ -1025,4 +1043,49 @@ func saveVMAMetadata(dumpDir string, details []profiler.VMAHotDetail) error {
 
 	path := filepath.Join(dumpDir, "hot_vma_metadata.json")
 	return os.WriteFile(path, data, 0644)
+}
+
+// hotVMAsEntry is a single range in CRIU's hot-vmas.json format.
+type hotVMAsEntry struct {
+	Start string `json:"start"`
+	End   string `json:"end"`
+}
+
+// hotVMAsJSON is the top-level structure for CRIU's hot-vmas.json.
+// CRIU's prefetch.c load_hot_vma_metadata() parses the "excluded" array
+// to seed hot IOVs with high priority in the prefetch queue.
+type hotVMAsJSON struct {
+	Excluded []hotVMAsEntry `json:"excluded"`
+	NoParent []hotVMAsEntry `json:"no_parent"`
+}
+
+// saveHotVMAsJSON writes hot VMA regions in CRIU's hot-vmas.json format.
+// This file is read by the lazy-pages daemon's prefetch engine to prioritize
+// fetching hot memory regions first during restore.
+func saveHotVMAsJSON(dumpDir string, hotRegions []profiler.HotRegion) error {
+	excluded := make([]hotVMAsEntry, len(hotRegions))
+	for i, r := range hotRegions {
+		excluded[i] = hotVMAsEntry{
+			Start: fmt.Sprintf("0x%x", r.StartAddr),
+			End:   fmt.Sprintf("0x%x", r.EndAddr),
+		}
+	}
+
+	j := hotVMAsJSON{
+		Excluded: excluded,
+		NoParent: []hotVMAsEntry{},
+	}
+
+	data, err := json.MarshalIndent(j, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal hot-vmas.json: %w", err)
+	}
+
+	path := filepath.Join(dumpDir, "hot-vmas.json")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return fmt.Errorf("failed to write hot-vmas.json: %w", err)
+	}
+
+	log.Printf("Saved hot-vmas.json (%d hot regions) to %s", len(hotRegions), path)
+	return nil
 }

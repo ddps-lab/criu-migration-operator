@@ -42,6 +42,43 @@ type CheckpointPolicy struct {
 	// MaxCheckpointChainDepth is the maximum chain depth before full checkpoint
 	// +kubebuilder:default=10
 	MaxCheckpointChainDepth int `json:"maxCheckpointChainDepth,omitempty"`
+
+	// DeadlineScheduler configures the agent-side deadline-driven scheduler.
+	// When enabled, the controller's periodic pre-checkpoint is disabled.
+	DeadlineScheduler DeadlineSchedulerConfig `json:"deadlineScheduler,omitempty"`
+}
+
+// DeadlineSchedulerConfig configures the agent-side deadline scheduler.
+// The scheduler uses dirty page profiling to decide when to pre-dump,
+// ensuring migration can complete within the cloud provider's termination deadline.
+type DeadlineSchedulerConfig struct {
+	// Enabled activates the deadline scheduler
+	// +kubebuilder:default=false
+	Enabled bool `json:"enabled,omitempty"`
+
+	// DryRun logs decisions without triggering actual pre-dumps
+	// +kubebuilder:default=false
+	DryRun bool `json:"dryRun,omitempty"`
+
+	// DeadlineSeconds is the termination deadline in seconds (e.g., 120 for AWS, 30 for Azure)
+	// +kubebuilder:default=120
+	DeadlineSeconds int `json:"deadlineSeconds,omitempty"`
+
+	// BandwidthMBps is the estimated upload bandwidth in MB/s
+	// +kubebuilder:default=100
+	BandwidthMBps int `json:"bandwidthMBps,omitempty"`
+
+	// ScanIntervalMs is the scheduler evaluation interval in milliseconds
+	// +kubebuilder:default=2000
+	ScanIntervalMs int `json:"scanIntervalMs,omitempty"`
+
+	// TFreezeMs is the estimated process freeze time in milliseconds
+	// +kubebuilder:default=50
+	TFreezeMs int `json:"tFreezeMs,omitempty"`
+
+	// TMarginMs is the safety margin in milliseconds
+	// +kubebuilder:default=5000
+	TMarginMs int `json:"tMarginMs,omitempty"`
 }
 
 // MigrationPolicy defines migration behavior
@@ -127,6 +164,20 @@ type StorageConfig struct {
 	// AsyncPrefetch enables asynchronous prefetching in lazy-pages
 	// +kubebuilder:default=false
 	AsyncPrefetch bool `json:"asyncPrefetch,omitempty"`
+
+	// PrefetchWorkers sets the number of async prefetch worker threads (default: 4)
+	PrefetchWorkers int `json:"prefetchWorkers,omitempty"`
+
+	// DirectUpload enables CRIU's native S3 upload during dump (zero disk I/O)
+	DirectUpload bool `json:"directUpload,omitempty"`
+
+	// SemiSyncIOV controls semi-synchronous IOV fetch. Default: enabled when object storage is active.
+	// Set to false to disable (ablation: page-by-page fault handling only).
+	SemiSyncIOV *bool `json:"semiSyncIOV,omitempty"`
+
+	// HotVMASeed controls hot VMA priority seeding. Default: enabled when async prefetch is active.
+	// Set to false to disable (ablation: sequential prefetch only).
+	HotVMASeed *bool `json:"hotVMASeed,omitempty"`
 }
 
 // MigratableAppStatus defines the observed state of MigratableApp

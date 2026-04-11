@@ -1,0 +1,34 @@
+apiVersion: migration.io/v1alpha1
+kind: MigratableApp
+metadata:
+  name: memory-writer
+spec:
+  template:
+    metadata:
+      labels:
+        app: memory-writer
+    spec:
+      shareProcessNamespace: true
+      containers:
+      - name: app
+        image: python:3.9-slim
+        command: ["python3", "-c"]
+        args:
+        - |
+          import ctypes, time, os
+          print(f"PID: {os.getpid()}", flush=True)
+          buf = ctypes.create_string_buffer(8 * 1024 * 1024)
+          i = 0
+          while True:
+              ctypes.memset(buf, i % 256, len(buf))
+              i += 1
+              time.sleep(0.5)
+              if i % 10 == 0:
+                  print(f"Write cycle {i}", flush=True)
+  checkpointPolicy:
+    interval: "120s"
+  storage:
+    type: s3
+    bucket: test-bucket
+    region: us-east-1
+    credentialsSecret: s3-credentials
