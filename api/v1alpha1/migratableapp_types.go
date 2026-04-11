@@ -49,13 +49,10 @@ type CheckpointPolicy struct {
 }
 
 // DeadlineSchedulerConfig configures the agent-side deadline scheduler.
-// The scheduler uses dirty page profiling to decide when to pre-dump,
-// ensuring migration can complete within the cloud provider's termination deadline.
+// DeadlineSchedulerConfig provides parameters for the dirty volume invariant scheduler.
+// Used when autoAdjust=true. The agent evaluates T_remain periodically and triggers
+// pre-dumps when the invariant (T_remain < Deadline) is about to be violated.
 type DeadlineSchedulerConfig struct {
-	// Enabled activates the deadline scheduler
-	// +kubebuilder:default=false
-	Enabled bool `json:"enabled,omitempty"`
-
 	// DryRun logs decisions without triggering actual pre-dumps
 	// +kubebuilder:default=false
 	DryRun bool `json:"dryRun,omitempty"`
@@ -68,11 +65,11 @@ type DeadlineSchedulerConfig struct {
 	// +kubebuilder:default=0
 	BandwidthMBps int `json:"bandwidthMBps,omitempty"`
 
-	// ScanIntervalMs is the scheduler evaluation interval in milliseconds
-	// +kubebuilder:default=2000
+	// ScanIntervalMs is the invariant evaluation interval in milliseconds
+	// +kubebuilder:default=5000
 	ScanIntervalMs int `json:"scanIntervalMs,omitempty"`
 
-	// TFreezeMs is the estimated process freeze time in milliseconds
+	// TFreezeMs is the estimated process freeze + final dump time in milliseconds
 	// +kubebuilder:default=50
 	TFreezeMs int `json:"tFreezeMs,omitempty"`
 

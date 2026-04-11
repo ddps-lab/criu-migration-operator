@@ -334,10 +334,13 @@ func (p *Profiler) ReinitAfterCRIU() error {
 		return fmt.Errorf("WP baseline after reinit: %w", err)
 	}
 
-	// Reset counters
+	// Reset counters and cached dirty volume
 	p.cumulativeDirtyBytes = 0
 	p.sampleCount = 0
 	p.startTime = time.Now()
+	p.mu.Lock()
+	p.dirtyVolume = DirtyVolume{}
+	p.mu.Unlock()
 
 	// Restart loop
 	p.stopCh = make(chan struct{})

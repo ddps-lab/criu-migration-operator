@@ -50,7 +50,7 @@ type Agent struct {
 	// Write profiler
 	profilerInst      *profiler.Profiler       // nil when not profiling
 	prevExcludeSet    map[uint64]uint64        // previous pre-dump's exclude ranges (start→end)
-	deadlineScheduler *DeadlineScheduler       // nil when not using deadline scheduler
+	invariantScheduler *InvariantScheduler      // nil when autoAdjust=false
 
 	// Network bandwidth info (auto-detected on startup)
 	networkInfo *NetworkBandwidthInfo
@@ -677,22 +677,19 @@ func (a *Agent) StartProfiling(ctx context.Context, req *pb.StartProfilingReques
 
 	log.Printf("Profiler started (pid=%d, vmas=%d)", a.mainPID, totalVMAs)
 
-	// Start deadline scheduler if configured via env vars
-	if os.Getenv("DEADLINE_SCHEDULER_ENABLED") == "true" {
-		dsCfg := DeadlineSchedulerConfig{
-			Enabled:         true,
-			DryRun:          os.Getenv("DEADLINE_SCHEDULER_DRY_RUN") == "true",
+	// Start invariant scheduler if autoAdjust is enabled
+	if os.Getenv("AUTO_ADJUST") == "true" {
+		cfg := InvariantSchedulerConfig{
 			DeadlineSeconds: envIntOrDefault("DEADLINE_SECONDS", 120),
 			BandwidthMBps:   a.resolvedBandwidthMBps(),
-			ScanIntervalMs:  envIntOrDefault("DEADLINE_SCAN_INTERVAL_MS", 2000),
+			ScanIntervalMs:  envIntOrDefault("DEADLINE_SCAN_INTERVAL_MS", 5000),
 			TFreezeMs:       envIntOrDefault("DEADLINE_TFREEZE_MS", 50),
 			TMarginMs:       envIntOrDefault("DEADLINE_TMARGIN_MS", 5000),
+			DryRun:          os.Getenv("DEADLINE_SCHEDULER_DRY_RUN") == "true",
 		}
-		ds := NewDeadlineScheduler(dsCfg, p, a)
-		a.deadlineScheduler = ds
-		go ds.Start(context.Background())
-		log.Printf("Deadline scheduler started (deadline=%ds, bw=%.0fMB/s)",
-			dsCfg.DeadlineSeconds, dsCfg.BandwidthMBps)
+		sched := NewInvariantScheduler(cfg, p, a)
+		a.invariantScheduler = sched
+		go sched.Start(context.Background())
 	}
 
 	return &pb.StartProfilingResponse{
@@ -708,43 +705,40 @@ func (a *Agent) autoStartProfiler(ctx context.Context) {
 	// Wait for process to stabilize (allow initial mmap/brk to settle)
 	time.Sleep(3 * time.Second)
 
-	if a.profilerInst != nil {
-		log.Printf("[AUTO-PROFILER] Profiler already running, skipping")
-		return
-	}
 	if a.mainPID <= 0 {
 		log.Printf("[AUTO-PROFILER] No main PID, skipping")
 		return
 	}
 
-	cfg := profiler.DefaultConfig()
-	p := profiler.New(a.mainPID, cfg)
-	if err := p.Start(); err != nil {
-		log.Printf("[AUTO-PROFILER] Failed to start: %v", err)
-		return
-	}
-
-	a.profilerInst = p
-	totalVMAs, hotVMAs := p.GetVMACounts()
-	log.Printf("[AUTO-PROFILER] Started (pid=%d, vmas=%d, hot=%d, interval=%dms, theta=%.1f, N=%d)",
-		a.mainPID, totalVMAs, hotVMAs, cfg.IntervalMs, cfg.HotThreshold, cfg.HotConsecutive)
-
-	// Start deadline scheduler if configured
-	if os.Getenv("DEADLINE_SCHEDULER_ENABLED") == "true" {
-		dsCfg := DeadlineSchedulerConfig{
-			Enabled:         true,
-			DryRun:          os.Getenv("DEADLINE_SCHEDULER_DRY_RUN") == "true",
+	if os.Getenv("AUTO_ADJUST") == "true" {
+		// autoAdjust=true: invariant scheduler handles everything
+		// Profiler starts AFTER initial pre-dump (inside scheduler)
+		cfg := InvariantSchedulerConfig{
 			DeadlineSeconds: envIntOrDefault("DEADLINE_SECONDS", 120),
 			BandwidthMBps:   a.resolvedBandwidthMBps(),
-			ScanIntervalMs:  envIntOrDefault("DEADLINE_SCAN_INTERVAL_MS", 2000),
+			ScanIntervalMs:  envIntOrDefault("DEADLINE_SCAN_INTERVAL_MS", 5000),
 			TFreezeMs:       envIntOrDefault("DEADLINE_TFREEZE_MS", 50),
 			TMarginMs:       envIntOrDefault("DEADLINE_TMARGIN_MS", 5000),
+			DryRun:          os.Getenv("DEADLINE_SCHEDULER_DRY_RUN") == "true",
 		}
-		ds := NewDeadlineScheduler(dsCfg, p, a)
-		a.deadlineScheduler = ds
-		go ds.Start(ctx)
-		log.Printf("[AUTO-PROFILER] Deadline scheduler started (deadline=%ds, bw=%.0fMB/s)",
-			dsCfg.DeadlineSeconds, dsCfg.BandwidthMBps)
+		sched := NewInvariantScheduler(cfg, nil, a) // profiler=nil, started after initial dump
+		a.invariantScheduler = sched
+		go sched.Start(ctx)
+	} else {
+		// autoAdjust=false: start profiler only (controller handles pre-dumps)
+		if a.profilerInst != nil {
+			return
+		}
+		pcfg := profiler.DefaultConfig()
+		p := profiler.New(a.mainPID, pcfg)
+		if err := p.Start(); err != nil {
+			log.Printf("[AUTO-PROFILER] Failed to start: %v", err)
+			return
+		}
+		a.profilerInst = p
+		totalVMAs, hotVMAs := p.GetVMACounts()
+		log.Printf("[AUTO-PROFILER] Started (pid=%d, vmas=%d, hot=%d, interval=%dms, theta=%.1f, N=%d)",
+			a.mainPID, totalVMAs, hotVMAs, pcfg.IntervalMs, pcfg.HotThreshold, pcfg.HotConsecutive)
 	}
 }
 

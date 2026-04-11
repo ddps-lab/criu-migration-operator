@@ -153,49 +153,21 @@ func (r *MigratableAppReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 
 	// Perform periodic checkpoints if pod is running and not migrating
-	// Skip pre-checkpoints during migration (after final dump has started)
+	// autoAdjust=true: agent's invariant scheduler handles pre-dumps, controller does nothing
+	// autoAdjust=false: controller does fixed-interval pre-dumps
 	if pod.Status.Phase == corev1.PodRunning && mapp.Status.Phase != "Migrating" {
-		shouldCP := false
-		reason := ""
-
 		if mapp.Spec.CheckpointPolicy.AutoAdjust {
-			// Adaptive: query dirty volume from agent (with timeout)
-			agentClient, err := NewAgentClient(pod)
-			if err == nil {
-				queryCtx, queryCancel := context.WithTimeout(ctx, 5*time.Second)
-				dvResp, dvErr := agentClient.GetDirtyVolume(queryCtx)
-				queryCancel()
-				agentClient.Close()
-
-				if dvErr == nil {
-					shouldCP, reason = shouldPerformCheckpointAdaptive(
-						&mapp, dvResp.CumulativeDirtyBytes, dvResp.DirtyRatePagesPerSec)
-				} else {
-					// Profiler not running or timeout, fallback to time-based
-					shouldCP = shouldPerformCheckpoint(&mapp)
-					reason = "interval(profiler_unavailable)"
-				}
-			} else {
-				shouldCP = shouldPerformCheckpoint(&mapp)
-				reason = "interval(agent_unavailable)"
-			}
+			// Agent-side invariant scheduler is responsible for pre-dumps.
+			// Controller only logs F_op warnings if available.
+			logger.V(1).Info("autoAdjust=true: agent invariant scheduler handles pre-dumps")
 		} else {
-			shouldCP = shouldPerformCheckpoint(&mapp)
-			reason = "interval"
-		}
-
-		logger.Info("Checkpoint decision",
-			"shouldCP", shouldCP,
-			"reason", reason,
-			"podPhase", pod.Status.Phase,
-			"mappPhase", mapp.Status.Phase,
-			"lastCheckpoint", mapp.Status.CheckpointStatus.LastCheckpointTime.Time,
-			"autoAdjust", mapp.Spec.CheckpointPolicy.AutoAdjust)
-
-		if shouldCP {
-			logger.Info("Performing pre-checkpoint", "reason", reason)
-			if err := r.performPreCheckpoint(ctx, &mapp, pod); err != nil {
-				logger.Error(err, "Failed to perform pre-checkpoint")
+			// Fixed interval pre-dump (controller-managed)
+			shouldCP := shouldPerformCheckpoint(&mapp)
+			if shouldCP {
+				logger.Info("Performing pre-checkpoint", "reason", "interval")
+				if err := r.performPreCheckpoint(ctx, &mapp, pod); err != nil {
+					logger.Error(err, "Failed to perform pre-checkpoint")
+				}
 			}
 		}
 	}
@@ -685,39 +657,16 @@ func (r *MigratableAppReconciler) reconcileWebhookManaged(ctx context.Context, m
 		return r.performMigration(ctx, mapp, pod, reason)
 	}
 
-	// Perform periodic checkpoints (same logic as normal reconcile)
+	// Perform periodic checkpoints
+	// autoAdjust=true: agent invariant scheduler handles pre-dumps
+	// autoAdjust=false: controller does fixed-interval pre-dumps
 	if pod.Status.Phase == corev1.PodRunning && mapp.Status.Phase != "Migrating" {
-		shouldCP := false
-		cpReason := ""
-
-		if mapp.Spec.CheckpointPolicy.AutoAdjust {
-			agentClient, err := NewAgentClient(pod)
-			if err == nil {
-				queryCtx, queryCancel := context.WithTimeout(ctx, 5*time.Second)
-				dvResp, dvErr := agentClient.GetDirtyVolume(queryCtx)
-				queryCancel()
-				agentClient.Close()
-
-				if dvErr == nil {
-					shouldCP, cpReason = shouldPerformCheckpointAdaptive(
-						mapp, dvResp.CumulativeDirtyBytes, dvResp.DirtyRatePagesPerSec)
-				} else {
-					shouldCP = shouldPerformCheckpoint(mapp)
-					cpReason = "interval(profiler_unavailable)"
+		if !mapp.Spec.CheckpointPolicy.AutoAdjust {
+			if shouldPerformCheckpoint(mapp) {
+				logger.Info("Webhook-managed pre-checkpoint", "reason", "interval")
+				if err := r.performPreCheckpoint(ctx, mapp, pod); err != nil {
+					logger.Error(err, "Failed to perform pre-checkpoint")
 				}
-			} else {
-				shouldCP = shouldPerformCheckpoint(mapp)
-				cpReason = "interval(agent_unavailable)"
-			}
-		} else {
-			shouldCP = shouldPerformCheckpoint(mapp)
-			cpReason = "interval"
-		}
-
-		if shouldCP {
-			logger.Info("Webhook-managed pre-checkpoint", "reason", cpReason)
-			if err := r.performPreCheckpoint(ctx, mapp, pod); err != nil {
-				logger.Error(err, "Failed to perform pre-checkpoint")
 			}
 		}
 	}
