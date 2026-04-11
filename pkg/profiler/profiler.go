@@ -6,6 +6,7 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -267,6 +268,7 @@ func (p *Profiler) Close() {
 func (p *Profiler) CleanupBeforeCRIU() error {
 	p.Stop()
 
+	// Unregister all VMAs from uffd
 	for _, vma := range p.registeredVMAs {
 		if err := uffdioUnregister(p.trackerUffdFd, vma.Start, vma.End); err != nil {
 			log.Printf("profiler: unregister VMA 0x%x-0x%x: %v", vma.Start, vma.End, err)
@@ -275,12 +277,31 @@ func (p *Profiler) CleanupBeforeCRIU() error {
 	p.registeredVMAs = nil
 	p.heat.reset()
 
+	// Close uffd fd in target process via ptrace injection.
+	// CRIU cannot dump userfaultfd file descriptors, so this fd must be
+	// removed before dump. After restore, setupUffdWP must be called again.
+	if p.targetUffdFd >= 0 {
+		if err := closeTargetUffd(p.pid, p.targetUffdFd); err != nil {
+			log.Printf("profiler: failed to close target uffd fd %d: %v", p.targetUffdFd, err)
+		} else {
+			log.Printf("profiler: closed target uffd fd %d in pid %d", p.targetUffdFd, p.pid)
+		}
+		p.targetUffdFd = -1
+	}
+
+	// Close tracker-side uffd fd
+	if p.trackerUffdFd >= 0 {
+		syscall.Close(p.trackerUffdFd)
+		p.trackerUffdFd = -1
+	}
+
 	log.Printf("profiler: cleanup before CRIU complete (pid=%d)", p.pid)
 	return nil
 }
 
-// ReinitAfterCRIU re-registers VMAs with the existing uffd fd and restarts profiling.
-// No ptrace injection needed — uses the tracker-side uffd fd.
+// ReinitAfterCRIU re-creates uffd via ptrace injection and restarts profiling.
+// CleanupBeforeCRIU closes both tracker and target uffd fds, so a full
+// re-setup is needed (same as initial Start, but reuses existing Profiler).
 func (p *Profiler) ReinitAfterCRIU() error {
 	vmas, err := parseVMAs(p.pid)
 	if err != nil {
@@ -288,16 +309,24 @@ func (p *Profiler) ReinitAfterCRIU() error {
 	}
 
 	writable := writableAnonymousVMAs(vmas)
-	for i := range writable {
-		if err := uffdioRegister(p.trackerUffdFd, writable[i].Start, writable[i].End); err != nil {
-			log.Printf("profiler: reinit register VMA 0x%x-0x%x: %v",
-				writable[i].Start, writable[i].End, err)
-			continue
-		}
-		p.registeredVMAs = append(p.registeredVMAs, AddrRange{
-			Start: writable[i].Start,
-			End:   writable[i].End,
-		})
+
+	// Full re-setup: ptrace inject new uffd into target
+	trackerFd, targetFd, registered, err := setupUffdWP(p.pid, writable)
+	if err != nil {
+		return fmt.Errorf("reinit uffd-wp setup: %w", err)
+	}
+	p.trackerUffdFd = trackerFd
+	p.targetUffdFd = targetFd
+	p.registeredVMAs = registered
+
+	// Reopen pagemap
+	if p.pagemapFile != nil {
+		p.pagemapFile.Close()
+	}
+	pmPath := fmt.Sprintf("/proc/%d/pagemap", p.pid)
+	p.pagemapFile, err = os.Open(pmPath)
+	if err != nil {
+		return fmt.Errorf("reopen pagemap: %w", err)
 	}
 
 	// WP all pages for fresh baseline

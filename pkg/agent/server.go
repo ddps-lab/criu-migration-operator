@@ -90,6 +90,11 @@ func (a *Agent) Start(ctx context.Context, port int) error {
 			log.Printf("Warning: failed to start user process: %v", err)
 			// Continue anyway - user can manually investigate
 		}
+
+		// Auto-start profiler after user process is running
+		if a.mainPID > 0 {
+			go a.autoStartProfiler(ctx)
+		}
 	}
 
 	// If in restore mode, perform restore first
@@ -646,6 +651,52 @@ func (a *Agent) StartProfiling(ctx context.Context, req *pb.StartProfilingReques
 		Pid:      int32(a.mainPID),
 		VmaCount: int32(totalVMAs),
 	}, nil
+}
+
+// autoStartProfiler waits for main process to stabilize then starts the profiler.
+// Called as goroutine after user process starts.
+func (a *Agent) autoStartProfiler(ctx context.Context) {
+	// Wait for process to stabilize (allow initial mmap/brk to settle)
+	time.Sleep(3 * time.Second)
+
+	if a.profilerInst != nil {
+		log.Printf("[AUTO-PROFILER] Profiler already running, skipping")
+		return
+	}
+	if a.mainPID <= 0 {
+		log.Printf("[AUTO-PROFILER] No main PID, skipping")
+		return
+	}
+
+	cfg := profiler.DefaultConfig()
+	p := profiler.New(a.mainPID, cfg)
+	if err := p.Start(); err != nil {
+		log.Printf("[AUTO-PROFILER] Failed to start: %v", err)
+		return
+	}
+
+	a.profilerInst = p
+	totalVMAs, hotVMAs := p.GetVMACounts()
+	log.Printf("[AUTO-PROFILER] Started (pid=%d, vmas=%d, hot=%d, interval=%dms, theta=%.1f, N=%d)",
+		a.mainPID, totalVMAs, hotVMAs, cfg.IntervalMs, cfg.HotThreshold, cfg.HotConsecutive)
+
+	// Start deadline scheduler if configured
+	if os.Getenv("DEADLINE_SCHEDULER_ENABLED") == "true" {
+		dsCfg := DeadlineSchedulerConfig{
+			Enabled:         true,
+			DryRun:          os.Getenv("DEADLINE_SCHEDULER_DRY_RUN") == "true",
+			DeadlineSeconds: envIntOrDefault("DEADLINE_SECONDS", 120),
+			BandwidthMBps:   envFloatOrDefault("BANDWIDTH_MBPS", 100),
+			ScanIntervalMs:  envIntOrDefault("DEADLINE_SCAN_INTERVAL_MS", 2000),
+			TFreezeMs:       envIntOrDefault("DEADLINE_TFREEZE_MS", 50),
+			TMarginMs:       envIntOrDefault("DEADLINE_TMARGIN_MS", 5000),
+		}
+		ds := NewDeadlineScheduler(dsCfg, p, a)
+		a.deadlineScheduler = ds
+		go ds.Start(ctx)
+		log.Printf("[AUTO-PROFILER] Deadline scheduler started (deadline=%ds, bw=%.0fMB/s)",
+			dsCfg.DeadlineSeconds, dsCfg.BandwidthMBps)
+	}
 }
 
 // StopProfiling implements the gRPC StopProfiling method

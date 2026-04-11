@@ -322,3 +322,69 @@ func ptraceDetach(pid int) error {
 func lockOSThread() {
 	runtime.LockOSThread()
 }
+
+// closeTargetUffd closes the userfaultfd file descriptor inside the target
+// process via ptrace syscall injection. This is required before CRIU dump
+// because CRIU cannot checkpoint userfaultfd descriptors.
+func closeTargetUffd(pid int, targetFd int64) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	// Seize and interrupt
+	if err := ptraceSeize(pid); err != nil {
+		return fmt.Errorf("ptrace seize: %w", err)
+	}
+	defer ptraceDetach(pid)
+
+	if err := ptraceInterrupt(pid); err != nil {
+		return fmt.Errorf("ptrace interrupt: %w", err)
+	}
+
+	var ws syscall.WaitStatus
+	if _, err := syscall.Wait4(pid, &ws, 0, nil); err != nil {
+		return fmt.Errorf("wait4: %w", err)
+	}
+
+	// Save registers and instruction
+	var regs unix.PtraceRegs
+	if err := unix.PtraceGetRegs(pid, &regs); err != nil {
+		return fmt.Errorf("getregs: %w", err)
+	}
+
+	var savedCode [8]byte
+	n, err := unix.PtracePeekText(pid, uintptr(regs.Rip), savedCode[:])
+	if err != nil || n != 8 {
+		return fmt.Errorf("peektext: %w", err)
+	}
+
+	// Poke syscall instruction (0x0F 0x05)
+	var code [8]byte
+	copy(code[:], savedCode[:])
+	code[0] = 0x0F
+	code[1] = 0x05
+	if _, err := unix.PtracePokeText(pid, uintptr(regs.Rip), code[:]); err != nil {
+		return fmt.Errorf("poketext: %w", err)
+	}
+
+	// Inject close(targetFd) syscall
+	inj := &ptraceInjector{pid: pid, savedRegs: regs}
+	copy(inj.savedCode[:], savedCode[:])
+	result, err := inj.injectSyscall(uint64(unix.SYS_CLOSE), uint64(targetFd), 0, 0, 0, 0, 0)
+	if err != nil {
+		// Restore original code before returning
+		unix.PtracePokeText(pid, uintptr(regs.Rip), savedCode[:])
+		unix.PtraceSetRegs(pid, &regs)
+		return fmt.Errorf("inject close: %w", err)
+	}
+	if int64(result) < 0 {
+		unix.PtracePokeText(pid, uintptr(regs.Rip), savedCode[:])
+		unix.PtraceSetRegs(pid, &regs)
+		return fmt.Errorf("close(%d) returned %d", targetFd, int64(result))
+	}
+
+	// Restore original instruction and registers
+	unix.PtracePokeText(pid, uintptr(regs.Rip), savedCode[:])
+	unix.PtraceSetRegs(pid, &regs)
+
+	return nil
+}
