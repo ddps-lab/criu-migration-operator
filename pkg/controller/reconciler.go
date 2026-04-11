@@ -595,6 +595,12 @@ func (r *MigratableAppReconciler) reconcileWebhookManaged(ctx context.Context, m
 		}
 	}
 
+	// Skip if already migrating (prevent race condition from multiple reconciles)
+	if mapp.Status.Phase == "Migrating" {
+		logger.Info("Webhook-managed app already migrating, waiting")
+		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+	}
+
 	// Check if migration is needed (spot interrupt annotation)
 	needsMigration, reason := r.needsMigration(ctx, mapp, pod)
 	if needsMigration {
