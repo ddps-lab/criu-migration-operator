@@ -19,9 +19,9 @@ type Config struct {
 // DefaultConfig returns the default profiler configuration.
 func DefaultConfig() Config {
 	return Config{
-		IntervalMs:     1000,
-		HotThreshold:   0.3,
-		HotConsecutive: 3,
+		IntervalMs:     5000, // 5-second scan interval (paper default)
+		HotThreshold:   0.3,  // θ = 0.3 dirty ratio threshold
+		HotConsecutive: 3,    // N = 3 consecutive intervals above θ
 	}
 }
 

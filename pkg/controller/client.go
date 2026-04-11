@@ -96,3 +96,8 @@ func (c *AgentClient) CheckPageServerStatus(ctx context.Context, pid int32) (*pb
 		Pid: pid,
 	})
 }
+
+// GetDirtyVolume returns current dirty page statistics from the profiler
+func (c *AgentClient) GetDirtyVolume(ctx context.Context) (*pb.GetDirtyVolumeResponse, error) {
+	return c.client.GetDirtyVolume(ctx, &pb.GetDirtyVolumeRequest{})
+}

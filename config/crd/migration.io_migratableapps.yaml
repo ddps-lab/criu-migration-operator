@@ -142,10 +142,18 @@ spec:
                     type: string
                   endpoint:
                     type: string
+                  directUpload:
+                    type: boolean
                   expressOneZone:
                     type: boolean
+                  hotVMASeed:
+                    type: boolean
+                  prefetchWorkers:
+                    type: integer
                   region:
                     type: string
+                  semiSyncIOV:
+                    type: boolean
                   type:
                     enum:
                     - s3

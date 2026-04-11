@@ -376,6 +376,22 @@ func (b *PodBuilder) buildAgentContainer(mode string) corev1.Container {
 		})
 	}
 
+	// Deadline scheduler config
+	ds := b.mapp.Spec.CheckpointPolicy.DeadlineScheduler
+	if ds.Enabled {
+		agentEnv = append(agentEnv,
+			corev1.EnvVar{Name: "DEADLINE_SCHEDULER_ENABLED", Value: "true"},
+			corev1.EnvVar{Name: "DEADLINE_SECONDS", Value: strconv.Itoa(ds.DeadlineSeconds)},
+			corev1.EnvVar{Name: "BANDWIDTH_MBPS", Value: strconv.Itoa(ds.BandwidthMBps)},
+			corev1.EnvVar{Name: "DEADLINE_SCAN_INTERVAL_MS", Value: strconv.Itoa(ds.ScanIntervalMs)},
+			corev1.EnvVar{Name: "DEADLINE_TFREEZE_MS", Value: strconv.Itoa(ds.TFreezeMs)},
+			corev1.EnvVar{Name: "DEADLINE_TMARGIN_MS", Value: strconv.Itoa(ds.TMarginMs)},
+		)
+		if ds.DryRun {
+			agentEnv = append(agentEnv, corev1.EnvVar{Name: "DEADLINE_SCHEDULER_DRY_RUN", Value: "true"})
+		}
+	}
+
 	// Add AWS credentials if provided
 	if b.awsAccessKey != "" && b.awsSecretKey != "" {
 		agentEnv = append(agentEnv,

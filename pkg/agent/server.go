@@ -48,8 +48,9 @@ type Agent struct {
 	lazyPagesActive     bool     // true while lazy-pages is still transferring pages
 
 	// Write profiler
-	profilerInst   *profiler.Profiler       // nil when not profiling
-	prevExcludeSet map[uint64]uint64        // previous pre-dump's exclude ranges (start→end)
+	profilerInst      *profiler.Profiler       // nil when not profiling
+	prevExcludeSet    map[uint64]uint64        // previous pre-dump's exclude ranges (start→end)
+	deadlineScheduler *DeadlineScheduler       // nil when not using deadline scheduler
 }
 
 // NewAgent creates a new CRIU agent
@@ -622,6 +623,24 @@ func (a *Agent) StartProfiling(ctx context.Context, req *pb.StartProfilingReques
 
 	log.Printf("Profiler started (pid=%d, vmas=%d)", a.mainPID, totalVMAs)
 
+	// Start deadline scheduler if configured via env vars
+	if os.Getenv("DEADLINE_SCHEDULER_ENABLED") == "true" {
+		dsCfg := DeadlineSchedulerConfig{
+			Enabled:         true,
+			DryRun:          os.Getenv("DEADLINE_SCHEDULER_DRY_RUN") == "true",
+			DeadlineSeconds: envIntOrDefault("DEADLINE_SECONDS", 120),
+			BandwidthMBps:   envFloatOrDefault("BANDWIDTH_MBPS", 100),
+			ScanIntervalMs:  envIntOrDefault("DEADLINE_SCAN_INTERVAL_MS", 2000),
+			TFreezeMs:       envIntOrDefault("DEADLINE_TFREEZE_MS", 50),
+			TMarginMs:       envIntOrDefault("DEADLINE_TMARGIN_MS", 5000),
+		}
+		ds := NewDeadlineScheduler(dsCfg, p, a)
+		a.deadlineScheduler = ds
+		go ds.Start(context.Background())
+		log.Printf("Deadline scheduler started (deadline=%ds, bw=%.0fMB/s)",
+			dsCfg.DeadlineSeconds, dsCfg.BandwidthMBps)
+	}
+
 	return &pb.StartProfilingResponse{
 		Success:  true,
 		Pid:      int32(a.mainPID),
@@ -1088,4 +1107,22 @@ func saveHotVMAsJSON(dumpDir string, hotRegions []profiler.HotRegion) error {
 
 	log.Printf("Saved hot-vmas.json (%d hot regions) to %s", len(hotRegions), path)
 	return nil
+}
+
+func envIntOrDefault(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
+func envFloatOrDefault(key string, def float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+	}
+	return def
 }

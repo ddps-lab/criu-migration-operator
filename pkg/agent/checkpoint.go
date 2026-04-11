@@ -106,6 +106,13 @@ func (m *CheckpointManager) PreCheckpoint(ctx context.Context, pid int, parentDu
 	// Add exclude args for hot page skipping
 	args = appendExcludeArgs(args, excludeArgs, dumpDir)
 
+	// Add S3 direct upload if enabled (CRIU uploads pages directly to S3)
+	directUpload := os.Getenv("DIRECT_UPLOAD") == "true"
+	if directUpload {
+		s3Prefix := m.getS3Prefix(dumpID)
+		args = append(args, m.s3Client.BuildCRIUUploadArgs(s3Prefix)...)
+	}
+
 	// Execute CRIU dump directly from agent container
 	// We DON'T need nsenter for dump because:
 	// 1. Shared PID namespace lets us see main container's processes
@@ -145,16 +152,24 @@ func (m *CheckpointManager) PreCheckpoint(ctx context.Context, pid int, parentDu
 		PagesDumped: pageCount,
 	}
 
-	// Upload to S3 asynchronously (keep all checkpoints in chain)
-	go func() {
-		uploadCtx := context.Background()
+	// Upload to S3
+	if directUpload {
+		// CRIU already uploaded — only upload agent-generated metadata
 		s3Prefix := m.getS3Prefix(dumpID)
-		if err := m.s3Client.UploadCheckpoint(uploadCtx, dumpDir, s3Prefix); err != nil {
-			fmt.Printf("Failed to upload checkpoint to S3: %v\n", err)
-			return
-		}
-		fmt.Printf("Successfully uploaded checkpoint to S3: %s\n", s3Prefix)
-	}()
+		m.uploadAgentMetadata(ctx, dumpDir, s3Prefix)
+		fmt.Printf("Direct upload mode: CRIU uploaded checkpoint to S3: %s\n", s3Prefix)
+	} else {
+		// Go-side upload asynchronously
+		go func() {
+			uploadCtx := context.Background()
+			s3Prefix := m.getS3Prefix(dumpID)
+			if err := m.s3Client.UploadCheckpoint(uploadCtx, dumpDir, s3Prefix); err != nil {
+				fmt.Printf("Failed to upload checkpoint to S3: %v\n", err)
+				return
+			}
+			fmt.Printf("Successfully uploaded checkpoint to S3: %s\n", s3Prefix)
+		}()
+	}
 
 	return result, nil
 }

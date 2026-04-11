@@ -140,11 +140,35 @@ func (r *MigratableAppReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Perform periodic checkpoints if pod is running and not migrating
 	// Skip pre-checkpoints during migration (after final dump has started)
 	if pod.Status.Phase == corev1.PodRunning && mapp.Status.Phase != "Migrating" {
-		if shouldPerformCheckpoint(&mapp) {
-			logger.Info("Performing periodic pre-checkpoint")
+		shouldCP := false
+		reason := ""
+
+		if mapp.Spec.CheckpointPolicy.AutoAdjust {
+			// Adaptive: query dirty volume from agent
+			agentClient, err := NewAgentClient(pod)
+			if err == nil {
+				defer agentClient.Close()
+				if dvResp, err := agentClient.GetDirtyVolume(ctx); err == nil {
+					shouldCP, reason = shouldPerformCheckpointAdaptive(
+						&mapp, dvResp.CumulativeDirtyBytes, dvResp.DirtyRatePagesPerSec)
+				} else {
+					// Profiler not running, fallback to time-based
+					shouldCP = shouldPerformCheckpoint(&mapp)
+					reason = "interval(profiler_unavailable)"
+				}
+			} else {
+				shouldCP = shouldPerformCheckpoint(&mapp)
+				reason = "interval(agent_unavailable)"
+			}
+		} else {
+			shouldCP = shouldPerformCheckpoint(&mapp)
+			reason = "interval"
+		}
+
+		if shouldCP {
+			logger.Info("Performing pre-checkpoint", "reason", reason)
 			if err := r.performPreCheckpoint(ctx, &mapp, pod); err != nil {
 				logger.Error(err, "Failed to perform pre-checkpoint")
-				// Don't return error, just log it and continue
 			}
 		}
 	}
@@ -325,7 +349,9 @@ func (r *MigratableAppReconciler) waitForPodRunning(ctx context.Context, pod *co
 	return fmt.Errorf("timeout waiting for pod to be running")
 }
 
-// shouldPerformCheckpoint determines if a checkpoint should be performed now
+// shouldPerformCheckpoint determines if a checkpoint should be performed now.
+// Uses time-based scheduling by default; when autoAdjust is enabled,
+// also considers dirty volume from the profiler.
 func shouldPerformCheckpoint(mapp *migrationv1alpha1.MigratableApp) bool {
 	// Parse checkpoint interval
 	interval, err := time.ParseDuration(mapp.Spec.CheckpointPolicy.Interval)
@@ -341,6 +367,61 @@ func shouldPerformCheckpoint(mapp *migrationv1alpha1.MigratableApp) bool {
 	// Check if enough time has passed since last checkpoint
 	elapsed := time.Since(mapp.Status.CheckpointStatus.LastCheckpointTime.Time)
 	return elapsed >= interval
+}
+
+// shouldPerformCheckpointAdaptive extends shouldPerformCheckpoint with
+// dirty volume awareness. Returns (should checkpoint, reason).
+//
+// Adaptive logic (from paper's Feasibility Score model):
+// - If cumulative dirty since last checkpoint > memoryThresholdMB → checkpoint now
+// - If dirty rate is low (< 10 pages/s) → extend interval (skip this cycle)
+// - If dirty rate is high and approaching threshold → checkpoint early
+func shouldPerformCheckpointAdaptive(
+	mapp *migrationv1alpha1.MigratableApp,
+	dirtyBytes int64,
+	dirtyRate float64,
+) (bool, string) {
+	// Fallback to time-based if autoAdjust not enabled
+	if !mapp.Spec.CheckpointPolicy.AutoAdjust {
+		if shouldPerformCheckpoint(mapp) {
+			return true, "interval"
+		}
+		return false, ""
+	}
+
+	// Always checkpoint if never done before
+	if mapp.Status.CheckpointStatus.LastCheckpointTime.IsZero() {
+		return true, "initial"
+	}
+
+	thresholdBytes := int64(mapp.Spec.CheckpointPolicy.MemoryThresholdMB) * 1024 * 1024
+	if thresholdBytes <= 0 {
+		thresholdBytes = 50 * 1024 * 1024 // default 50MB
+	}
+
+	// Check if dirty volume exceeds threshold
+	if dirtyBytes > thresholdBytes {
+		return true, fmt.Sprintf("dirty_threshold(%dMB>%dMB)",
+			dirtyBytes/1024/1024, thresholdBytes/1024/1024)
+	}
+
+	// If dirty rate is very low, skip this cycle (extend interval)
+	// This avoids unnecessary checkpoints when workload is idle
+	if dirtyRate < 10 { // < 10 pages/sec (~40KB/s)
+		return false, ""
+	}
+
+	// Time-based fallback: respect max interval even with autoAdjust
+	interval, err := time.ParseDuration(mapp.Spec.CheckpointPolicy.Interval)
+	if err != nil || interval == 0 {
+		interval = 30 * time.Second
+	}
+	elapsed := time.Since(mapp.Status.CheckpointStatus.LastCheckpointTime.Time)
+	if elapsed >= interval {
+		return true, "interval"
+	}
+
+	return false, ""
 }
 
 // performPreCheckpoint performs a pre-checkpoint on the running pod
