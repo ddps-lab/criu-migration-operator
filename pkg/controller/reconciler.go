@@ -39,6 +39,7 @@ const (
 // Reconcile is the main reconciliation loop
 func (r *MigratableAppReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
+	logger.Info("Reconcile triggered", "name", req.Name, "namespace", req.Namespace)
 
 	// Fetch the MigratableApp instance
 	var mapp migrationv1alpha1.MigratableApp
@@ -173,6 +174,14 @@ func (r *MigratableAppReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			shouldCP = shouldPerformCheckpoint(&mapp)
 			reason = "interval"
 		}
+
+		logger.Info("Checkpoint decision",
+			"shouldCP", shouldCP,
+			"reason", reason,
+			"podPhase", pod.Status.Phase,
+			"mappPhase", mapp.Status.Phase,
+			"lastCheckpoint", mapp.Status.CheckpointStatus.LastCheckpointTime.Time,
+			"autoAdjust", mapp.Spec.CheckpointPolicy.AutoAdjust)
 
 		if shouldCP {
 			logger.Info("Performing pre-checkpoint", "reason", reason)

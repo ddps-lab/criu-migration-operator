@@ -222,7 +222,8 @@ func (r *MigratableAppReconciler) performMigration(
 		"fromNode", sourcePod.Spec.NodeName,
 		"toNode", targetPod.Spec.NodeName)
 
-	return ctrl.Result{}, nil
+	// Requeue to resume periodic checkpoints on the new pod
+	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
 // handleMigrationFailure handles migration failure
