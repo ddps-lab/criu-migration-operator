@@ -79,7 +79,7 @@ rules:
   - create
   - patch
 
-# Secrets for AWS credentials
+# Secrets for AWS credentials and webhook secret mirroring
 - apiGroups:
   - ""
   resources:
@@ -88,6 +88,26 @@ rules:
   - get
   - list
   - watch
+  - create
+
+# ConfigMaps for webhook defaults and leader election
+- apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - get
+  - list
+  - watch
+
+# ReplicaSets and Deployments for webhook owner chain resolution
+- apiGroups:
+  - apps
+  resources:
+  - replicasets
+  - deployments
+  verbs:
+  - get
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1

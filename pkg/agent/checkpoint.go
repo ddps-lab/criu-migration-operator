@@ -153,16 +153,15 @@ func (m *CheckpointManager) PreCheckpoint(ctx context.Context, pid int, parentDu
 	}
 
 	// Upload to S3
+	s3Prefix := m.getS3Prefix(dumpID)
 	if directUpload {
 		// CRIU already uploaded — only upload agent-generated metadata
-		s3Prefix := m.getS3Prefix(dumpID)
 		m.uploadAgentMetadata(ctx, dumpDir, s3Prefix)
 		fmt.Printf("Direct upload mode: CRIU uploaded checkpoint to S3: %s\n", s3Prefix)
 	} else {
 		// Go-side upload asynchronously
 		go func() {
 			uploadCtx := context.Background()
-			s3Prefix := m.getS3Prefix(dumpID)
 			if err := m.s3Client.UploadCheckpoint(uploadCtx, dumpDir, s3Prefix); err != nil {
 				fmt.Printf("Failed to upload checkpoint to S3: %v\n", err)
 				return
@@ -170,6 +169,9 @@ func (m *CheckpointManager) PreCheckpoint(ctx context.Context, pid int, parentDu
 			fmt.Printf("Successfully uploaded checkpoint to S3: %s\n", s3Prefix)
 		}()
 	}
+
+	// Upload raw logs if enabled
+	m.uploadLogs(ctx, dumpDir, s3Prefix, "pre-dump")
 
 	return result, nil
 }
@@ -406,6 +408,9 @@ func (m *CheckpointManager) FinalDump(ctx context.Context, pid int, pageServerAd
 		}()
 	}
 
+	// Upload raw logs if enabled
+	m.uploadLogs(ctx, dumpDir, s3Prefix, "final-dump")
+
 	fmt.Printf("[DEBUG] FinalDump returning (strategy: %s, pageServerPID: %d)\n", strategy, pageServerPID)
 	return result, pageServerCmd, nil
 }
@@ -425,6 +430,46 @@ func (m *CheckpointManager) uploadAgentMetadata(ctx context.Context, dumpDir, s3
 		} else {
 			fmt.Printf("Uploaded agent metadata: %s\n", s3Key)
 		}
+	}
+}
+
+// uploadLogs uploads all raw CRIU logs and stats from a dump/restore directory to S3.
+// This is gated by the LOG_UPLOAD env var. Files are uploaded under s3Prefix/logs/.
+func (m *CheckpointManager) uploadLogs(ctx context.Context, dumpDir, s3Prefix, operation string) {
+	if os.Getenv("LOG_UPLOAD") != "true" {
+		return
+	}
+	if m.s3Client == nil {
+		return
+	}
+
+	// All log/stats files worth uploading
+	logFiles := []string{
+		"criu.log",
+		"restore.log",
+		"lazy-pages.log",
+		"stats-dump",
+		"stats-restore",
+		"hot_vma_metadata.json",
+		"hot-vmas.json",
+		"exclude-ranges.txt",
+	}
+
+	uploaded := 0
+	for _, name := range logFiles {
+		path := filepath.Join(dumpDir, name)
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		s3Key := s3Prefix + "/logs/" + name
+		if err := m.s3Client.UploadFile(ctx, path, s3Key); err != nil {
+			fmt.Printf("[LOG_UPLOAD] Warning: failed to upload %s: %v\n", name, err)
+		} else {
+			uploaded++
+		}
+	}
+	if uploaded > 0 {
+		fmt.Printf("[LOG_UPLOAD] Uploaded %d log files for %s to %s/logs/\n", uploaded, operation, s3Prefix)
 	}
 }
 
@@ -575,7 +620,7 @@ func (m *CheckpointManager) generateDumpID() string {
 func (m *CheckpointManager) getS3Prefix(dumpID string) string {
 	// Use appName (MigratableApp name) instead of podName for consistent S3 paths
 	// This ensures gen0, gen1, gen2... all use the same base path: checkpoints/my-web-app/...
-	return fmt.Sprintf("checkpoints/%s/%d/%s/%s", m.appName, m.generation, m.nodeName, dumpID)
+	return fmt.Sprintf("%s/%d/%s/%s", m.appName, m.generation, m.nodeName, dumpID)
 }
 
 // getDirectorySize calculates the total size of a directory

@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: migration-webhook
+  namespace: migration-system
+spec:
+  selector:
+    app: migration-controller
+  ports:
+  - port: 443
+    targetPort: 9443
+    protocol: TCP
+    name: webhook

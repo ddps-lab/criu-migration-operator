@@ -238,7 +238,7 @@ func (b *PodBuilder) buildBasePod(generation int, mode string) *corev1.Pod {
 	}
 
 	// Add CRIU agent sidecar
-	agentContainer := b.buildAgentContainer(mode)
+	agentContainer := b.BuildAgentContainer(mode)
 	pod.Spec.Containers = append(pod.Spec.Containers, agentContainer)
 
 	// Add volumes
@@ -273,8 +273,8 @@ func (b *PodBuilder) buildBasePod(generation int, mode string) *corev1.Pod {
 	return pod
 }
 
-// buildAgentContainer builds the CRIU agent sidecar container
-func (b *PodBuilder) buildAgentContainer(mode string) corev1.Container {
+// BuildAgentContainer builds the CRIU agent sidecar container
+func (b *PodBuilder) BuildAgentContainer(mode string) corev1.Container {
 	agentEnv := []corev1.EnvVar{
 		{
 			Name: "POD_NAME",
@@ -331,6 +331,10 @@ func (b *PodBuilder) buildAgentContainer(mode string) corev1.Container {
 		{
 			Name:  "STORAGE_TYPE",
 			Value: b.mapp.Spec.Storage.Type,
+		},
+		{
+			Name:  "LOG_UPLOAD",
+			Value: strconv.FormatBool(b.mapp.Spec.Storage.LogUpload),
 		},
 	}
 

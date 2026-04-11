@@ -6,9 +6,13 @@ A Kubernetes operator that enables zero-downtime live migration of applications 
 
 This operator provides:
 - **Automatic Migration**: Detects spot instance interruptions and automatically migrates workloads
-- **Incremental Checkpoints**: Regular pre-checkpoints with minimal overhead
+- **Incremental Checkpoints**: Regular pre-checkpoints with S3 direct upload (zero disk I/O)
 - **Object Storage Integration**: Stores checkpoints in S3/MinIO/GCS for cross-node migration
-- **Lazy Page Loading**: Fast restore with on-demand page fetching from object storage
+- **Lazy Page Loading**: Fast restore with async prefetch and hot VMA priority seeding
+- **Write Profiler**: userfaultfd write-protect (uffd-wp) based dirty page tracking for adaptive checkpointing
+- **Deadline Scheduler**: F_op feasibility model for deadline-driven pre-dumps within spot termination windows
+- **Experiment Data Collection**: Automatic upload of all raw CRIU logs and per-fault metrics to S3
+- **Ablation Control**: Fine-grained feature flags for systematic performance evaluation
 - **Kubernetes Native**: CRD-based API with familiar kubectl workflows
 
 ## Architecture
@@ -702,13 +706,40 @@ Apache License 2.0
 - **Impact**: Successful mount namespace handling in Kubernetes
 - **Details**: See [CRIU_JOIN_NS_MNT_BUG_FIX.md](../../criu_build/CRIU_JOIN_NS_MNT_BUG_FIX.md)
 
+### 2026-04: Major Feature Update
+
+- **S3 Direct Upload**: CRIU `--object-storage-upload` for zero-disk-I/O dumps
+- **Write Profiler (uffd-wp)**: Auto-start dirty page tracking via userfaultfd write-protect
+  - ptrace syscall injection for uffd creation in target process
+  - Heat classification: theta=0.3, N=3 consecutive intervals, 5s scan
+  - Automatic cleanup before CRIU dump and reinit after
+- **Hot VMA Integration**:
+  - Pre-dump: `--exclude-range` for hot VMAs (skip frequently written regions)
+  - Final dump: `hot-vmas.json` uploaded to S3 for lazy-pages prefetch seeding
+- **Async Prefetch**: `--async-prefetch --prefetch-workers N` for parallel page fetching
+- **Ablation Control**: `semiSyncIOV` and `hotVMASeed` flags for 5-mode experiment
+- **Deadline Scheduler**: F_op feasibility model for deadline-driven pre-dumps
+- **Per-fault Metrics**: Lazy-pages log parsing (stall times, S3 vs cache, pages per fault)
+- **Log Upload**: `logUpload: true` uploads all raw CRIU logs to S3 for experiment collection
+- **Path-style S3**: `--object-storage-path-style` for MinIO compatibility
+
+## Documentation
+
+- [Architecture](docs/architecture.md) — component overview, data flow, pod structure
+- [Configuration Reference](docs/configuration-reference.md) — all CRD fields, env vars, examples
+- [Webhook Injection](docs/webhook-injection.md) — annotation-based sidecar injection for existing Deployments
+- [Log Upload](docs/log-upload.md) — experiment data collection setup
+- [E2E Verification](docs/e2e-verification-report.md) — full test results on QEMU cluster
+- [Migration Strategies](docs/migration_strategy.md) — full vs lazy-storage vs lazy-direct vs lazy-hybrid
+- [Write Profiler](docs/write_profiler.md) — uffd-wp dirty page tracking details
+- [Resolved Issues](docs/resolved_issues.md) — past bugs and fixes
+
 ## References
 
 - [CRIU Documentation](https://criu.org/)
+- [ddps-lab/criu-s3](https://github.com/ddps-lab/criu-s3) — CRIU fork with S3 object storage support
 - [Kubernetes Operator Pattern](https://kubernetes.io/docs/concepts/extend-kubernetes/operator/)
 - [controller-runtime](https://github.com/kubernetes-sigs/controller-runtime)
-- [Kubebuilder](https://book.kubebuilder.io/)
-- [Full Documentation](../../CRIU_MIGRATION_OPERATOR_DOCS.md)
 
 ## Contact
 

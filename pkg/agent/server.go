@@ -51,6 +51,9 @@ type Agent struct {
 	profilerInst      *profiler.Profiler       // nil when not profiling
 	prevExcludeSet    map[uint64]uint64        // previous pre-dump's exclude ranges (start→end)
 	deadlineScheduler *DeadlineScheduler       // nil when not using deadline scheduler
+
+	// Network bandwidth info (auto-detected on startup)
+	networkInfo *NetworkBandwidthInfo
 }
 
 // NewAgent creates a new CRIU agent
@@ -69,6 +72,11 @@ func NewAgent(workDir, s3Bucket, s3Endpoint, s3Region, mode, podName, nodeName s
 	checkpointMgr := NewCheckpointManager(workDir, s3Client, podName, nodeName)
 	restoreMgr := NewRestoreManager(workDir, s3Client, podName, nodeName)
 
+	// Auto-detect network bandwidth (AWS API or on-premise NIC)
+	netInfo := DetectNetworkBandwidth()
+	log.Printf("Network bandwidth detected: source=%s, baseline=%.0f MB/s, peak=%.0f MB/s",
+		netInfo.Source, netInfo.BaselineMBps, netInfo.PeakMBps)
+
 	agent := &Agent{
 		checkpointMgr: checkpointMgr,
 		restoreMgr:    restoreMgr,
@@ -77,6 +85,7 @@ func NewAgent(workDir, s3Bucket, s3Endpoint, s3Region, mode, podName, nodeName s
 		startTime:     time.Now(),
 		podName:       podName,
 		nodeName:      nodeName,
+		networkInfo:   netInfo,
 	}
 
 	return agent, nil
@@ -241,21 +250,23 @@ func (a *Agent) FinalDump(ctx context.Context, req *pb.FinalDumpRequest) (*pb.Fi
 	a.pageServerCtx = pageServerCtx
 	a.pageServerCancel = pageServerCancel
 
-	// Build exclude args from profiler if active
+	// Capture profiler data BEFORE cleanup (cleanup resets heat classifier)
 	var excludeArgs *CRIUExcludeArgs
+	var savedHotRegions []profiler.HotRegion
+	var savedVMADetails []profiler.VMAHotDetail
 	if a.profilerInst != nil {
-		currentHot := a.profilerInst.GetHotRegions()
+		savedHotRegions = a.profilerInst.GetHotRegions()
+		savedVMADetails = a.profilerInst.GetVMADetails()
 		a.profilerInst.CleanupBeforeCRIU()
 
 		// Final dump: --exclude-range only (triggers has_parent=false for full dump)
-		// No --no-parent-range needed (final dump dumps everything)
 		excludeArgs = &CRIUExcludeArgs{}
-		for _, r := range currentHot {
+		for _, r := range savedHotRegions {
 			excludeArgs.ExcludeRanges = append(excludeArgs.ExcludeRanges,
 				profiler.AddrRange{Start: r.StartAddr, End: r.EndAddr})
 		}
-		log.Printf("Profiler: %d exclude ranges for final dump", len(excludeArgs.ExcludeRanges))
-		// No reinit needed - process will be frozen after final dump
+		log.Printf("Profiler: %d exclude ranges, %d hot regions for final dump",
+			len(excludeArgs.ExcludeRanges), len(savedHotRegions))
 	}
 
 	// Determine migration strategy
@@ -281,20 +292,23 @@ func (a *Agent) FinalDump(ctx context.Context, req *pb.FinalDumpRequest) (*pb.Fi
 	}
 
 	// Save hot VMA metadata alongside checkpoint for restore-side prefetch priority
-	if a.profilerInst != nil {
-		vmaDetails := a.profilerInst.GetVMADetails()
-		hotRegions := a.profilerInst.GetHotRegions()
+	// Uses data captured BEFORE CleanupBeforeCRIU() (which resets heat classifier)
+	if len(savedHotRegions) > 0 || len(savedVMADetails) > 0 {
 		dumpDir := filepath.Join(a.checkpointMgr.workDir, result.DumpID)
 
-		if err := saveVMAMetadata(dumpDir, vmaDetails); err != nil {
+		if err := saveVMAMetadata(dumpDir, savedVMADetails); err != nil {
 			log.Printf("Warning: failed to save VMA metadata: %v", err)
 		} else {
-			log.Printf("Saved VMA metadata (%d VMAs) to %s", len(vmaDetails), dumpDir)
+			log.Printf("Saved VMA metadata (%d VMAs) to %s", len(savedVMADetails), dumpDir)
 		}
 
 		// Save CRIU-compatible hot-vmas.json for prefetch seeding
-		if err := saveHotVMAsJSON(dumpDir, hotRegions); err != nil {
+		if err := saveHotVMAsJSON(dumpDir, savedHotRegions); err != nil {
 			log.Printf("Warning: failed to save hot-vmas.json: %v", err)
+		} else {
+			// Upload hot-vmas.json to S3 separately (CRIU direct upload doesn't include it)
+			s3Prefix := a.checkpointMgr.getS3Prefix(result.DumpID)
+			a.checkpointMgr.uploadAgentMetadata(context.Background(), dumpDir, s3Prefix)
 		}
 	}
 
@@ -449,7 +463,7 @@ func (a *Agent) Restore(ctx context.Context, req *pb.RestoreRequest) (*pb.Restor
 		}
 	}
 
-	// Wait for lazy-pages completion in background, then collect metrics
+	// Wait for lazy-pages completion in background, then collect metrics and upload logs
 	if needsLazy {
 		go func() {
 			if lazyPagesCmd != nil && lazyPagesCmd.Process != nil {
@@ -458,15 +472,50 @@ func (a *Agent) Restore(ctx context.Context, req *pb.RestoreRequest) (*pb.Restor
 			a.lazyPagesActive = false
 			log.Printf("[TARGET-AGENT] Lazy-pages completed, checkpoints are now allowed")
 
+			dumpDir := filepath.Join(a.restoreMgr.workDir, req.DumpId)
+
 			// Parse lazy-pages metrics
-			logPath := filepath.Join(a.restoreMgr.workDir, req.DumpId, "lazy-pages.log")
+			logPath := filepath.Join(dumpDir, "lazy-pages.log")
 			if m, err := ParseLazyPagesLog(logPath); err == nil {
 				log.Printf("[TARGET-AGENT] Lazy-pages metrics: faults=%d (S3=%d cache=%d) stall_avg=%.1fms p50=%.1fms max=%.1fms daemon=%.1fs cache_hit=%.1f%%",
 					m.TotalFaults, m.S3Faults, m.CacheFaults,
 					m.StallAvg, m.StallP50, m.StallMax,
 					m.DaemonDurationS, m.CacheHitRate)
+
+				// Save parsed metrics as JSON for easy collection
+				if os.Getenv("LOG_UPLOAD") == "true" {
+					metricsJSON, _ := json.Marshal(m)
+					metricsPath := filepath.Join(dumpDir, "lazy-pages-metrics.json")
+					os.WriteFile(metricsPath, metricsJSON, 0644)
+				}
 			} else {
 				log.Printf("[TARGET-AGENT] Warning: failed to parse lazy-pages metrics: %v", err)
+			}
+
+			// Upload all restore logs to S3 if enabled
+			if os.Getenv("LOG_UPLOAD") == "true" && a.restoreMgr.s3Client != nil {
+				s3Prefix := req.S3Prefix
+				logFiles := []string{
+					"criu.log", "restore.log", "lazy-pages.log",
+					"stats-dump", "stats-restore",
+					"lazy-pages-metrics.json",
+				}
+				uploaded := 0
+				for _, name := range logFiles {
+					path := filepath.Join(dumpDir, name)
+					if _, err := os.Stat(path); err != nil {
+						continue
+					}
+					s3Key := s3Prefix + "/logs/" + name
+					if err := a.restoreMgr.s3Client.UploadFile(context.Background(), path, s3Key); err != nil {
+						log.Printf("[LOG_UPLOAD] Warning: failed to upload %s: %v", name, err)
+					} else {
+						uploaded++
+					}
+				}
+				if uploaded > 0 {
+					log.Printf("[LOG_UPLOAD] Uploaded %d restore log files to %s/logs/", uploaded, s3Prefix)
+				}
 			}
 		}()
 	}
@@ -634,7 +683,7 @@ func (a *Agent) StartProfiling(ctx context.Context, req *pb.StartProfilingReques
 			Enabled:         true,
 			DryRun:          os.Getenv("DEADLINE_SCHEDULER_DRY_RUN") == "true",
 			DeadlineSeconds: envIntOrDefault("DEADLINE_SECONDS", 120),
-			BandwidthMBps:   envFloatOrDefault("BANDWIDTH_MBPS", 100),
+			BandwidthMBps:   a.resolvedBandwidthMBps(),
 			ScanIntervalMs:  envIntOrDefault("DEADLINE_SCAN_INTERVAL_MS", 2000),
 			TFreezeMs:       envIntOrDefault("DEADLINE_TFREEZE_MS", 50),
 			TMarginMs:       envIntOrDefault("DEADLINE_TMARGIN_MS", 5000),
@@ -686,7 +735,7 @@ func (a *Agent) autoStartProfiler(ctx context.Context) {
 			Enabled:         true,
 			DryRun:          os.Getenv("DEADLINE_SCHEDULER_DRY_RUN") == "true",
 			DeadlineSeconds: envIntOrDefault("DEADLINE_SECONDS", 120),
-			BandwidthMBps:   envFloatOrDefault("BANDWIDTH_MBPS", 100),
+			BandwidthMBps:   a.resolvedBandwidthMBps(),
 			ScanIntervalMs:  envIntOrDefault("DEADLINE_SCAN_INTERVAL_MS", 2000),
 			TFreezeMs:       envIntOrDefault("DEADLINE_TFREEZE_MS", 50),
 			TMarginMs:       envIntOrDefault("DEADLINE_TMARGIN_MS", 5000),
@@ -1176,4 +1225,21 @@ func envFloatOrDefault(key string, def float64) float64 {
 		}
 	}
 	return def
+}
+
+// resolvedBandwidthMBps returns the effective bandwidth in MB/s.
+// Priority: BANDWIDTH_MBPS env var (explicit) → auto-detected → default (100 MB/s).
+func (a *Agent) resolvedBandwidthMBps() float64 {
+	// Explicit env var takes priority
+	if v := os.Getenv("BANDWIDTH_MBPS"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
+			return f
+		}
+	}
+	// Auto-detected
+	if a.networkInfo != nil && a.networkInfo.BaselineMBps > 0 {
+		return a.networkInfo.BaselineMBps
+	}
+	// Default
+	return 100
 }

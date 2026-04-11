@@ -82,6 +82,12 @@ func (r *MigratableAppReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{Requeue: true}, nil
 	}
 
+	// Webhook-managed MigratableApps: pod lifecycle is owned by Deployment/StatefulSet,
+	// not by the controller. Only perform checkpoints and migration.
+	if mapp.Labels != nil && mapp.Labels["migration.io/webhook-managed"] == "true" {
+		return r.reconcileWebhookManaged(ctx, &mapp)
+	}
+
 	// Get current pod
 	pod, err := r.getCurrentPod(ctx, &mapp)
 	if err != nil {
@@ -578,7 +584,7 @@ func (r *MigratableAppReconciler) cleanupS3Checkpoints(ctx context.Context, mapp
 
 	// Delete all checkpoints for this app (all generations)
 	// Format: checkpoints/{app-name}/
-	s3Prefix := fmt.Sprintf("checkpoints/%s/", mapp.Name)
+	s3Prefix := fmt.Sprintf("%s/", mapp.Name)
 
 	logger.Info("Deleting S3 checkpoints for app", "prefix", s3Prefix, "bucket", mapp.Spec.Storage.Bucket)
 
@@ -635,6 +641,90 @@ func (r *MigratableAppReconciler) cleanupS3Checkpoints(ctx context.Context, mapp
 
 	logger.Info("Successfully deleted S3 checkpoints", "prefix", s3Prefix, "count", len(objectsToDelete))
 	return nil
+}
+
+// reconcileWebhookManaged handles MigratableApp CRs created by the webhook.
+// Pod lifecycle is owned by Deployment/StatefulSet — the controller only handles
+// checkpoint scheduling and migration triggers.
+func (r *MigratableAppReconciler) reconcileWebhookManaged(ctx context.Context, mapp *migrationv1alpha1.MigratableApp) (ctrl.Result, error) {
+	logger := log.FromContext(ctx)
+	logger.Info("Reconciling webhook-managed app", "name", mapp.Name)
+
+	// Find pod by label (not by owner reference — pod is owned by ReplicaSet)
+	pod, err := r.getCurrentPod(ctx, mapp)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			// Pod doesn't exist yet (Deployment rollout pending)
+			logger.Info("Webhook-managed pod not found, waiting")
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
+		}
+		return ctrl.Result{}, err
+	}
+
+	// Update status with current pod info
+	if mapp.Status.Phase == "" || mapp.Status.Phase == "Pending" {
+		mapp.Status.Phase = "Running"
+		mapp.Status.CurrentNode = pod.Spec.NodeName
+		mapp.Status.CurrentPodName = pod.Name
+		mapp.Status.LastUpdateTime = metav1.Now()
+		if err := r.Status().Update(ctx, mapp); err != nil {
+			if errors.IsConflict(err) {
+				return ctrl.Result{Requeue: true}, nil
+			}
+			return ctrl.Result{}, err
+		}
+	}
+
+	// Check if migration is needed (spot interrupt annotation)
+	needsMigration, reason := r.needsMigration(ctx, mapp, pod)
+	if needsMigration {
+		logger.Info("Webhook-managed migration needed", "reason", reason)
+		return r.performMigration(ctx, mapp, pod, reason)
+	}
+
+	// Perform periodic checkpoints (same logic as normal reconcile)
+	if pod.Status.Phase == corev1.PodRunning && mapp.Status.Phase != "Migrating" {
+		shouldCP := false
+		cpReason := ""
+
+		if mapp.Spec.CheckpointPolicy.AutoAdjust {
+			agentClient, err := NewAgentClient(pod)
+			if err == nil {
+				queryCtx, queryCancel := context.WithTimeout(ctx, 5*time.Second)
+				dvResp, dvErr := agentClient.GetDirtyVolume(queryCtx)
+				queryCancel()
+				agentClient.Close()
+
+				if dvErr == nil {
+					shouldCP, cpReason = shouldPerformCheckpointAdaptive(
+						mapp, dvResp.CumulativeDirtyBytes, dvResp.DirtyRatePagesPerSec)
+				} else {
+					shouldCP = shouldPerformCheckpoint(mapp)
+					cpReason = "interval(profiler_unavailable)"
+				}
+			} else {
+				shouldCP = shouldPerformCheckpoint(mapp)
+				cpReason = "interval(agent_unavailable)"
+			}
+		} else {
+			shouldCP = shouldPerformCheckpoint(mapp)
+			cpReason = "interval"
+		}
+
+		if shouldCP {
+			logger.Info("Webhook-managed pre-checkpoint", "reason", cpReason)
+			if err := r.performPreCheckpoint(ctx, mapp, pod); err != nil {
+				logger.Error(err, "Failed to perform pre-checkpoint")
+			}
+		}
+	}
+
+	// Requeue
+	requeueAfter := 10 * time.Second
+	if interval, err := time.ParseDuration(mapp.Spec.CheckpointPolicy.Interval); err == nil && interval > 0 {
+		requeueAfter = interval
+	}
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
 // Helper functions for finalizer management

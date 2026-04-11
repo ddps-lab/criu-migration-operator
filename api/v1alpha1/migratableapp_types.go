@@ -64,8 +64,8 @@ type DeadlineSchedulerConfig struct {
 	// +kubebuilder:default=120
 	DeadlineSeconds int `json:"deadlineSeconds,omitempty"`
 
-	// BandwidthMBps is the estimated upload bandwidth in MB/s
-	// +kubebuilder:default=100
+	// BandwidthMBps is the upload bandwidth in MB/s. 0 = auto-detect from AWS API or NIC speed.
+	// +kubebuilder:default=0
 	BandwidthMBps int `json:"bandwidthMBps,omitempty"`
 
 	// ScanIntervalMs is the scheduler evaluation interval in milliseconds
@@ -178,6 +178,11 @@ type StorageConfig struct {
 	// HotVMASeed controls hot VMA priority seeding. Default: enabled when async prefetch is active.
 	// Set to false to disable (ablation: sequential prefetch only).
 	HotVMASeed *bool `json:"hotVMASeed,omitempty"`
+
+	// LogUpload enables uploading all raw CRIU logs and stats to S3 after dump/restore.
+	// Uploaded files: criu.log, restore.log, lazy-pages.log, stats-dump, stats-restore,
+	// hot_vma_metadata.json, and per-fault metrics. Useful for experiment data collection.
+	LogUpload bool `json:"logUpload,omitempty"`
 }
 
 // MigratableAppStatus defines the observed state of MigratableApp

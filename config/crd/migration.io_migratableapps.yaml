@@ -48,7 +48,7 @@ spec:
                   deadlineScheduler:
                     properties:
                       bandwidthMBps:
-                        default: 100
+                        default: 0
                         type: integer
                       deadlineSeconds:
                         default: 120
@@ -146,6 +146,8 @@ spec:
                   expressOneZone:
                     type: boolean
                   hotVMASeed:
+                    type: boolean
+                  logUpload:
                     type: boolean
                   prefetchWorkers:
                     type: integer

@@ -55,7 +55,7 @@ func (r *MigratableAppReconciler) performMigration(
 
 	// Pre-calculate S3 prefix (will be updated after final dump)
 	// Note: This is a placeholder; actual dump ID will be determined during final dump
-	s3Prefix := fmt.Sprintf("checkpoints/%s/%d/%s/",
+	s3Prefix := fmt.Sprintf("%s/%d/%s/",
 		mapp.Name, mapp.Status.Generation, sourcePod.Spec.NodeName)
 
 	targetPod := builder.BuildRestorePod(newGeneration, lastCheckpointID, sourcePod.Spec.NodeName, s3Prefix, sourcePod.Status.PodIP)
@@ -118,7 +118,7 @@ func (r *MigratableAppReconciler) performMigration(
 	logger.Info("Received external mounts from source", "count", len(externalMounts), "mounts", externalMounts)
 
 	// Step 7: Update target pod annotations
-	actualS3Prefix := fmt.Sprintf("checkpoints/%s/%d/%s/%s",
+	actualS3Prefix := fmt.Sprintf("%s/%d/%s/%s",
 		mapp.Name, mapp.Status.Generation, sourcePod.Spec.NodeName, dumpResp.DumpId)
 
 	if err := r.Get(ctx, client.ObjectKeyFromObject(targetPod), targetPod); err != nil {

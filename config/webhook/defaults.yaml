@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: migration-defaults
+  namespace: migration-system
+data:
+  # Storage configuration
+  storageType: "s3"
+  bucket: "checkpoints"
+  region: "us-east-1"
+  endpoint: ""
+  downloadEndpoint: ""
+  credentialsSecret: "migration-credentials"
+
+  # Feature flags
+  directUpload: "false"
+  asyncPrefetch: "false"
+  prefetchWorkers: "4"
+  logUpload: "false"
+
+  # Checkpoint policy
+  strategy: "lazy-storage"
+  checkpointInterval: "30s"
+  autoAdjust: "true"
+  memoryThresholdMB: "100"
+  maxChainDepth: "10"
