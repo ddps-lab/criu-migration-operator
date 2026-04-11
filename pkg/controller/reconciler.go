@@ -132,6 +132,11 @@ func (r *MigratableAppReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	if statusChanged {
 		mapp.Status.LastUpdateTime = metav1.Now()
 		if err := r.Status().Update(ctx, &mapp); err != nil {
+			if errors.IsConflict(err) {
+				// Conflict is expected during rapid reconciles; requeue immediately
+				logger.Info("Status update conflict, requeueing")
+				return ctrl.Result{Requeue: true}, nil
+			}
 			logger.Error(err, "Failed to update status")
 			return ctrl.Result{}, err
 		}
@@ -144,15 +149,19 @@ func (r *MigratableAppReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		reason := ""
 
 		if mapp.Spec.CheckpointPolicy.AutoAdjust {
-			// Adaptive: query dirty volume from agent
+			// Adaptive: query dirty volume from agent (with timeout)
 			agentClient, err := NewAgentClient(pod)
 			if err == nil {
-				defer agentClient.Close()
-				if dvResp, err := agentClient.GetDirtyVolume(ctx); err == nil {
+				queryCtx, queryCancel := context.WithTimeout(ctx, 5*time.Second)
+				dvResp, dvErr := agentClient.GetDirtyVolume(queryCtx)
+				queryCancel()
+				agentClient.Close()
+
+				if dvErr == nil {
 					shouldCP, reason = shouldPerformCheckpointAdaptive(
 						&mapp, dvResp.CumulativeDirtyBytes, dvResp.DirtyRatePagesPerSec)
 				} else {
-					// Profiler not running, fallback to time-based
+					// Profiler not running or timeout, fallback to time-based
 					shouldCP = shouldPerformCheckpoint(&mapp)
 					reason = "interval(profiler_unavailable)"
 				}
@@ -472,9 +481,21 @@ func (r *MigratableAppReconciler) performPreCheckpoint(ctx context.Context, mapp
 		"chainDepth", mapp.Status.CheckpointStatus.CheckpointChainDepth,
 		"chainRoot", mapp.Status.CheckpointStatus.CheckpointChainRoot)
 
-	// Update status
-	if err := r.Status().Update(ctx, mapp); err != nil {
-		return fmt.Errorf("failed to update status: %w", err)
+	// Update status with retry on conflict
+	for retries := 0; retries < 3; retries++ {
+		if err := r.Status().Update(ctx, mapp); err != nil {
+			if errors.IsConflict(err) {
+				// Re-fetch and re-apply
+				if err := r.Get(ctx, client.ObjectKeyFromObject(mapp), mapp); err != nil {
+					return fmt.Errorf("failed to re-fetch after conflict: %w", err)
+				}
+				mapp.Status.CheckpointStatus.LastCheckpointID = resp.DumpId
+				mapp.Status.CheckpointStatus.LastCheckpointTime = metav1.Now()
+				continue
+			}
+			return fmt.Errorf("failed to update status: %w", err)
+		}
+		break
 	}
 
 	return nil
