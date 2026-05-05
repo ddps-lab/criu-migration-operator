@@ -10,14 +10,34 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// scanResult holds the result of a PAGEMAP_SCAN for one VMA.
+// CRIU IOV granularity: 4 MB (1024 pages). Hot regions are tracked at this
+// granularity within each VMA so that the classifier matches the unit CRIU
+// actually compresses (one zstd seekable frame) and lazy-restore prefetches
+// (one Range GET).
+const chunkBytes uint64 = 4 * 1024 * 1024
+const chunkPages uint64 = chunkBytes / pageSize
+
+// scanResult holds the result of a PAGEMAP_SCAN for one VMA. ChunkDirty[k] is
+// the dirty-page count in chunk k of this VMA, where chunk k spans
+// [VMAStart + k*chunkBytes, min(VMAStart + (k+1)*chunkBytes, VMAEnd)). The
+// last chunk may be partial. Sum of ChunkDirty equals DirtyPages by
+// construction. Empty / nil ChunkDirty means the scanner did not emit
+// chunk-level data (e.g. a fallback path without chunk aggregation).
 type scanResult struct {
-	VMAStart   uint64
-	VMAEnd     uint64
-	DirtyPages int64
-	TotalPages uint64
-	VMAType    VMAType
-	Pathname   string
+	VMAStart    uint64
+	VMAEnd      uint64
+	DirtyPages  int64
+	TotalPages  uint64
+	VMAType     VMAType
+	Pathname    string
+	ChunkDirty  []uint16
+}
+
+// vmaChunkCount returns the number of 4 MB chunks needed to cover the VMA,
+// rounding up so the last chunk may be partial.
+func vmaChunkCount(start, end uint64) int {
+	bytes := end - start
+	return int((bytes + chunkBytes - 1) / chunkBytes)
 }
 
 // openPagemap opens /proc/pid/pagemap for PAGEMAP_SCAN ioctl.
@@ -108,9 +128,27 @@ func scanDirtyPages(pagemapFd int, vmas []VMAInfo) ([]scanResult, int64, error) 
 
 		var vmaDirty int64
 		numRegions := int(ret)
+
+		// Aggregate dirty pages per IOV-aligned 4 MB chunk in addition to
+		// the VMA total. The classifier downstream uses chunk-level data
+		// to identify hot sub-regions of large VMAs (e.g. XGBoost DMatrix)
+		// that whole-VMA averaging would dilute below the threshold.
+		nChunks := vmaChunkCount(vmas[i].Start, vmas[i].End)
+		var chunkDirty []uint16
+		if nChunks > 0 {
+			chunkDirty = make([]uint16, nChunks)
+		}
 		for j := 0; j < numRegions; j++ {
 			pages := int64(regions[j].End-regions[j].Start) / pageSize
 			vmaDirty += pages
+			if chunkDirty != nil {
+				for addr := regions[j].Start; addr < regions[j].End; addr += pageSize {
+					ci := int((addr - vmas[i].Start) / chunkBytes)
+					if ci >= 0 && ci < nChunks && chunkDirty[ci] < ^uint16(0) {
+						chunkDirty[ci]++
+					}
+				}
+			}
 		}
 
 		totalPages := vmas[i].Pages()
@@ -121,6 +159,7 @@ func scanDirtyPages(pagemapFd int, vmas []VMAInfo) ([]scanResult, int64, error) 
 			TotalPages: totalPages,
 			VMAType:    vmas[i].Type,
 			Pathname:   vmas[i].Pathname,
+			ChunkDirty: chunkDirty,
 		})
 		totalDirty += vmaDirty
 	}

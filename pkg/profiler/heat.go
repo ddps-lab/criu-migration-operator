@@ -1,102 +1,125 @@
 package profiler
 
-// heatClassifier tracks per-VMA write heat using a sliding window.
-// Each VMA gets a circular buffer of recent written ratios.
-// A VMA is "hot" if its ratio exceeds hotThreshold for hotConsecutive consecutive intervals.
+// heatClassifier tracks per-chunk write heat using a sliding window. Each VMA
+// is split into IOV-aligned 4 MB chunks (matching CRIU's compress/lazy-fetch
+// granularity); each chunk is independently classified as hot / cold from its
+// own write history. A chunk is "hot" if its dirty/total ratio exceeds
+// hotThreshold for hotConsecutive consecutive intervals. VMAs <= 4 MB form a
+// single chunk, preserving the previous per-VMA semantics for small VMAs.
 type heatClassifier struct {
 	hotThreshold   float64
 	hotConsecutive int
-	states         map[uint64]*vmaHeatState // keyed by VMA start address
+	states         map[chunkKey]*chunkHeatState
 }
 
-// vmaHeatState holds sliding-window state for one VMA.
-type vmaHeatState struct {
-	Start          uint64
-	End            uint64
-	Ratios         [windowSize]float64 // circular buffer
-	Head           int                 // next write position
-	Count          int                 // number of samples added
-	ConsecutiveHot int                 // consecutive intervals above threshold
+// chunkKey uniquely identifies one 4 MB chunk within a VMA.
+type chunkKey struct {
+	VMAStart uint64
+	ChunkIdx int
+}
+
+// chunkHeatState holds sliding-window state for one 4 MB chunk.
+type chunkHeatState struct {
+	VMAStart       uint64
+	VMAEnd         uint64
+	ChunkIdx       int
+	ChunkStart     uint64
+	ChunkEnd       uint64
+	Ratios         [windowSize]float64
+	Head           int
+	Count          int
+	ConsecutiveHot int
 	IsHot          bool
-	LastDirty      int64   // dirty pages in most recent scan
-	LastTotal      uint64  // total pages in most recent scan
-	VMAType        VMAType // VMA type (heap, anonymous, etc.)
-	Pathname       string  // VMA pathname (e.g., "[heap]", "/lib/x.so")
+	LastDirty      int64
+	LastTotal      uint64 // pages in this chunk
+	VMAType        VMAType
+	Pathname       string
 }
 
 func newHeatClassifier(hotThreshold float64, hotConsecutive int) *heatClassifier {
 	return &heatClassifier{
 		hotThreshold:   hotThreshold,
 		hotConsecutive: hotConsecutive,
-		states:         make(map[uint64]*vmaHeatState),
+		states:         make(map[chunkKey]*chunkHeatState),
 	}
 }
 
-// update processes scan results and updates heat state for each VMA.
-// Returns the current list of hot regions.
+// update processes scan results and updates heat state for each chunk.
+// Returns the current list of hot chunks as HotRegion entries.
 func (h *heatClassifier) update(results []scanResult) []HotRegion {
-	// Mark all existing states as not-seen this round
-	seen := make(map[uint64]bool, len(results))
+	seen := make(map[chunkKey]bool, len(results))
 
 	for _, r := range results {
-		seen[r.VMAStart] = true
-
-		state, ok := h.states[r.VMAStart]
-		if !ok {
-			state = &vmaHeatState{
-				Start: r.VMAStart,
-				End:   r.VMAEnd,
+		nChunks := vmaChunkCount(r.VMAStart, r.VMAEnd)
+		if nChunks == 0 {
+			continue
+		}
+		for ci := 0; ci < nChunks; ci++ {
+			chunkStart := r.VMAStart + uint64(ci)*chunkBytes
+			chunkEnd := chunkStart + chunkBytes
+			if chunkEnd > r.VMAEnd {
+				chunkEnd = r.VMAEnd
 			}
-			h.states[r.VMAStart] = state
+			chunkPages := (chunkEnd - chunkStart) / pageSize
+
+			var dirty int64
+			if r.ChunkDirty != nil && ci < len(r.ChunkDirty) {
+				dirty = int64(r.ChunkDirty[ci])
+			}
+
+			key := chunkKey{r.VMAStart, ci}
+			seen[key] = true
+
+			state, ok := h.states[key]
+			if !ok {
+				state = &chunkHeatState{
+					VMAStart: r.VMAStart,
+					ChunkIdx: ci,
+				}
+				h.states[key] = state
+			}
+			state.VMAEnd = r.VMAEnd
+			state.ChunkStart = chunkStart
+			state.ChunkEnd = chunkEnd
+			state.LastDirty = dirty
+			state.LastTotal = chunkPages
+			state.VMAType = r.VMAType
+			state.Pathname = r.Pathname
+
+			var ratio float64
+			if chunkPages > 0 {
+				ratio = float64(dirty) / float64(chunkPages)
+			}
+
+			state.Ratios[state.Head] = ratio
+			state.Head = (state.Head + 1) % windowSize
+			if state.Count < windowSize {
+				state.Count++
+			}
+
+			if ratio > h.hotThreshold {
+				state.ConsecutiveHot++
+			} else {
+				state.ConsecutiveHot = 0
+			}
+
+			state.IsHot = state.ConsecutiveHot >= h.hotConsecutive
 		}
-		// Update address range in case VMA was resized
-		state.End = r.VMAEnd
-
-		// Store dirty/total pages and VMA info for this interval
-		state.LastDirty = r.DirtyPages
-		state.LastTotal = r.TotalPages
-		state.VMAType = r.VMAType
-		state.Pathname = r.Pathname
-
-		// Calculate written ratio for this interval
-		var ratio float64
-		if r.TotalPages > 0 {
-			ratio = float64(r.DirtyPages) / float64(r.TotalPages)
-		}
-
-		// Add to sliding window
-		state.Ratios[state.Head] = ratio
-		state.Head = (state.Head + 1) % windowSize
-		if state.Count < windowSize {
-			state.Count++
-		}
-
-		// Check consecutive hot
-		if ratio > h.hotThreshold {
-			state.ConsecutiveHot++
-		} else {
-			state.ConsecutiveHot = 0
-		}
-
-		state.IsHot = state.ConsecutiveHot >= h.hotConsecutive
 	}
 
-	// Remove states for VMAs that no longer exist
-	for addr := range h.states {
-		if !seen[addr] {
-			delete(h.states, addr)
+	for k := range h.states {
+		if !seen[k] {
+			delete(h.states, k)
 		}
 	}
 
-	// Collect hot regions
 	var hot []HotRegion
 	for _, state := range h.states {
 		if state.IsHot {
-			// Get most recent ratio
 			idx := (state.Head - 1 + windowSize) % windowSize
 			hot = append(hot, HotRegion{
-				StartAddr:      state.Start,
-				EndAddr:        state.End,
+				StartAddr:      state.ChunkStart,
+				EndAddr:        state.ChunkEnd,
 				WrittenRatio:   state.Ratios[idx],
 				ConsecutiveHot: state.ConsecutiveHot,
 			})
@@ -105,21 +128,31 @@ func (h *heatClassifier) update(results []scanResult) []HotRegion {
 	return hot
 }
 
-// reset clears all heat state. Called when profiling is restarted.
 func (h *heatClassifier) reset() {
-	h.states = make(map[uint64]*vmaHeatState)
+	h.states = make(map[chunkKey]*chunkHeatState)
 }
 
-// totalVMAs returns the number of tracked VMAs.
-func (h *heatClassifier) totalVMAs() int {
+// totalChunks returns the number of tracked 4 MB chunks.
+func (h *heatClassifier) totalChunks() int {
 	return len(h.states)
 }
 
-// VMAHotDetail contains per-VMA hot/cold classification with dirty stats.
+// totalVMAs returns the number of distinct VMAs covered by the tracked chunks.
+func (h *heatClassifier) totalVMAs() int {
+	vmaSet := make(map[uint64]struct{}, len(h.states))
+	for _, s := range h.states {
+		vmaSet[s.VMAStart] = struct{}{}
+	}
+	return len(vmaSet)
+}
+
+// VMAHotDetail contains per-chunk hot/cold classification with dirty stats.
+// One entry per tracked 4 MB chunk; consumers that want per-VMA aggregates
+// can group by Start (the chunk start) modulo chunkBytes.
 type VMAHotDetail struct {
-	Start          uint64
-	End            uint64
-	Type           string // "heap", "anonymous", "data", "stack", etc.
+	Start          uint64 // chunk start address
+	End            uint64 // chunk end address (chunk-bound, possibly < VMA end for last chunk)
+	Type           string
 	Pathname       string
 	IsHot          bool
 	DirtyPages     int64
@@ -128,7 +161,8 @@ type VMAHotDetail struct {
 	ConsecutiveHot int
 }
 
-// getAllVMAs returns all tracked VMAs with their current hot/cold classification.
+// getAllVMAs returns all tracked chunks with their current classification.
+// (Name retained for protobuf/RPC compatibility; entries are now chunks.)
 func (h *heatClassifier) getAllVMAs() []VMAHotDetail {
 	result := make([]VMAHotDetail, 0, len(h.states))
 	for _, state := range h.states {
@@ -138,8 +172,8 @@ func (h *heatClassifier) getAllVMAs() []VMAHotDetail {
 			ratio = state.Ratios[idx]
 		}
 		result = append(result, VMAHotDetail{
-			Start:          state.Start,
-			End:            state.End,
+			Start:          state.ChunkStart,
+			End:            state.ChunkEnd,
 			Type:           state.VMAType.String(),
 			Pathname:       state.Pathname,
 			IsHot:          state.IsHot,
@@ -152,7 +186,8 @@ func (h *heatClassifier) getAllVMAs() []VMAHotDetail {
 	return result
 }
 
-// hotVMAs returns the number of hot VMAs.
+// hotVMAs returns the number of hot chunks (preserves the old method name to
+// avoid touching callers; semantically this is now the count of hot chunks).
 func (h *heatClassifier) hotVMAs() int {
 	count := 0
 	for _, s := range h.states {
