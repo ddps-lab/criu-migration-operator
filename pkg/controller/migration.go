@@ -13,6 +13,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+// debugPreserveSourcePodAnnotation, when set to "true" on a MigratableApp
+// CR, makes the controller skip deleting the source pod after a successful
+// migration. The pod is detached from any user Service (workload labels
+// stripped) and left Running so that `kubectl logs <source-pod>` and the
+// CRIU artifacts under /checkpoints remain accessible for post-migration
+// analysis. Intended for measurement / debugging only — production
+// deployments should leave this annotation off so resources are cleaned up.
+const debugPreserveSourcePodAnnotation = "migration.io/debug-preserve-source-pod"
+
 // performMigration performs the actual migration process
 func (r *MigratableAppReconciler) performMigration(
 	ctx context.Context,
@@ -186,10 +195,35 @@ func (r *MigratableAppReconciler) performMigration(
 		}
 	}
 
-	// Step 11: Delete source pod
-	logger.Info("Deleting source pod")
-	if err := r.Delete(ctx, sourcePod); err != nil {
-		logger.Error(err, "Failed to delete source pod (non-fatal)")
+	// Step 11: Source pod cleanup. Default behavior is to delete the source
+	// pod (production). For measurement / debugging that needs post-migration
+	// access to source-side logs and CRIU artifacts, set the annotation
+	// `migration.io/debug-preserve-source-pod: "true"` on the MigratableApp;
+	// the source pod is then detached from any user Service (workload labels
+	// stripped) and left Running for manual cleanup later.
+	if mapp.Annotations[debugPreserveSourcePodAnnotation] == "true" {
+		logger.Info("debug-preserve-source-pod annotation set: detaching source pod from Service and leaving Running for log access")
+		sourcePodCopy := sourcePod.DeepCopy()
+		if sourcePodCopy.Labels == nil {
+			sourcePodCopy.Labels = map[string]string{}
+		}
+		for k := range sourcePodCopy.Labels {
+			if k != "migration.io/app" && k != "migration.io/generation" {
+				delete(sourcePodCopy.Labels, k)
+			}
+		}
+		if sourcePodCopy.Annotations == nil {
+			sourcePodCopy.Annotations = map[string]string{}
+		}
+		sourcePodCopy.Annotations["migration.io/post-migration"] = time.Now().UTC().Format(time.RFC3339)
+		if err := r.Update(ctx, sourcePodCopy); err != nil {
+			logger.Error(err, "Failed to detach source pod (non-fatal)")
+		}
+	} else {
+		logger.Info("Deleting source pod")
+		if err := r.Delete(ctx, sourcePod); err != nil {
+			logger.Error(err, "Failed to delete source pod (non-fatal)")
+		}
 	}
 
 	// Step 12: Update status
