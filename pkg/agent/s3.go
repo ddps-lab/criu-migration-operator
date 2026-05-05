@@ -540,10 +540,15 @@ func (c *S3Client) needsBucketOption() bool {
 	return true
 }
 
-// needsCRIUCredentials returns whether CRIU needs explicit --aws-access-key/--aws-secret-key flags
-// MinIO and S3 Express One Zone require explicit credentials for CRIU's libcurl-based client
+// needsCRIUCredentials returns whether CRIU needs explicit --aws-access-key/--aws-secret-key flags.
+// CRIU's libcurl-based client does not implement the AWS SDK credential
+// chain (no IMDS/IRSA/profile resolution), so it must be given credentials
+// via flag whenever any are available. We forward env-var credentials for
+// all storage types (MinIO, Express One Zone, standard S3); the caller
+// guards on AWS_ACCESS_KEY_ID being set so the flags are only emitted
+// when there is actually something to forward.
 func (c *S3Client) needsCRIUCredentials() bool {
-	return c.isMinIO() || c.expressOneZone
+	return os.Getenv("AWS_ACCESS_KEY_ID") != "" || c.expressOneZone
 }
 
 // needsCRIUExpressOneZone returns whether CRIU needs --express-one-zone flag.
