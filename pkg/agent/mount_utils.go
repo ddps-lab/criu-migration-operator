@@ -66,25 +66,23 @@ func getExternalMounts(pid int) (map[string]string, error) {
 		}
 		fsType := fields[sepIdx+1]
 
-		// Skip kernel-internal filesystems
+		// Skip kernel-internal filesystems whose fsType is kernel-managed
+		// AND whose mount path is the canonical kernel one. Bind mounts
+		// from these (e.g. read-only /proc/bus from proc) are kept by
+		// CRIU intrinsically, so we don't list them as external.
 		if kernelFS[fsType] {
 			continue
 		}
 
-		// Skip /dev itself (tmpfs for device files, not a K8s mount)
-		if mountPoint == "/dev" {
-			continue
-		}
-
-		// Skip /sys and children (already excluded by sysfs)
-		if mountPoint == "/sys" || strings.HasPrefix(mountPoint, "/sys/") {
-			continue
-		}
-
-		// Skip /proc children
-		if strings.HasPrefix(mountPoint, "/proc/") {
-			continue
-		}
+		// /sys and its children are already excluded above (sysfs/cgroup).
+		// What's left here is everything containerd injected on top:
+		//   - /dev itself (tmpfs)                         → external dev
+		//   - /dev/* tmpfs children (mqueue is kernelFS)  → external
+		//   - /proc/* tmpfs/null masks                    → external
+		//   - K8s bind mounts (/etc/hosts, etc.)          → external
+		// Marking ALL of them external is the right call: at restore
+		// time the destination's containerd recreates them, and CRIU
+		// uses --ext-mount-map auto to wire the new mounts back in.
 
 		// Generate a label from the mount point path
 		// /etc/hosts -> etc-hosts

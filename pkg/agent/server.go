@@ -250,6 +250,20 @@ func (a *Agent) FinalDump(ctx context.Context, req *pb.FinalDumpRequest) (*pb.Fi
 	a.pageServerCtx = pageServerCtx
 	a.pageServerCancel = pageServerCancel
 
+	// Stop the invariant scheduler before doing anything else. The
+	// scheduler runs on its own goroutine and periodically issues
+	// PreCheckpoint → ReinitAfterCRIU (which ptrace-injects a NEW
+	// userfaultfd FD into the target). If a tick fires between our
+	// CleanupBeforeCRIU below and CRIU's actual seize/dump, CRIU sees
+	// the freshly re-injected uffd FD and fails with
+	//   "Can't dump file N of that type [600] (anon anon_inode:[userfaultfd])".
+	// Stopping the scheduler is one-way: the migration is moving the
+	// process to a different node, so no further pre-dumps are useful here.
+	if a.invariantScheduler != nil {
+		a.invariantScheduler.Stop()
+		a.invariantScheduler = nil
+	}
+
 	// Capture profiler data BEFORE cleanup (cleanup resets heat classifier)
 	var excludeArgs *CRIUExcludeArgs
 	var savedHotRegions []profiler.HotRegion
