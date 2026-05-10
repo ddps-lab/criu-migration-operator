@@ -359,7 +359,7 @@ func (b *PodBuilder) BuildAgentContainer(mode string) corev1.Container {
 			Value: "true",
 		})
 	}
-	if b.mapp.Spec.Storage.HotVMASeed != nil && !*b.mapp.Spec.Storage.HotVMASeed {
+	if b.mapp.Spec.Storage.HotIOVSeed != nil && !*b.mapp.Spec.Storage.HotIOVSeed {
 		agentEnv = append(agentEnv, corev1.EnvVar{
 			Name:  "NO_HOT_VMA_SEED",
 			Value: "true",

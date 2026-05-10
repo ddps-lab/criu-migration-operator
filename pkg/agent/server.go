@@ -316,11 +316,11 @@ func (a *Agent) FinalDump(ctx context.Context, req *pb.FinalDumpRequest) (*pb.Fi
 			log.Printf("Saved VMA metadata (%d VMAs) to %s", len(savedVMADetails), dumpDir)
 		}
 
-		// Save CRIU-compatible hot-vmas.json for prefetch seeding
-		if err := saveHotVMAsJSON(dumpDir, savedHotRegions); err != nil {
-			log.Printf("Warning: failed to save hot-vmas.json: %v", err)
+		// Save CRIU-compatible hot-iovs.json for prefetch seeding
+		if err := saveHotIOVsJSON(dumpDir, savedHotRegions); err != nil {
+			log.Printf("Warning: failed to save hot-iovs.json: %v", err)
 		} else {
-			// Upload hot-vmas.json to S3 separately (CRIU direct upload doesn't include it)
+			// Upload hot-iovs.json to S3 separately (CRIU direct upload doesn't include it)
 			s3Prefix := a.checkpointMgr.getS3Prefix(result.DumpID)
 			a.checkpointMgr.uploadAgentMetadata(context.Background(), dumpDir, s3Prefix)
 		}
@@ -1172,48 +1172,48 @@ func saveVMAMetadata(dumpDir string, details []profiler.VMAHotDetail) error {
 	return os.WriteFile(path, data, 0644)
 }
 
-// hotVMAsEntry is a single range in CRIU's hot-vmas.json format.
-type hotVMAsEntry struct {
+// hotIOVsEntry is a single range in CRIU's hot-iovs.json format.
+type hotIOVsEntry struct {
 	Start string `json:"start"`
 	End   string `json:"end"`
 }
 
-// hotVMAsJSON is the top-level structure for CRIU's hot-vmas.json.
+// hotIOVsJSON is the top-level structure for CRIU's hot-iovs.json.
 // CRIU's prefetch.c load_hot_vma_metadata() parses the "excluded" array
 // to seed hot IOVs with high priority in the prefetch queue.
-type hotVMAsJSON struct {
-	Excluded []hotVMAsEntry `json:"excluded"`
-	NoParent []hotVMAsEntry `json:"no_parent"`
+type hotIOVsJSON struct {
+	Excluded []hotIOVsEntry `json:"excluded"`
+	NoParent []hotIOVsEntry `json:"no_parent"`
 }
 
-// saveHotVMAsJSON writes hot VMA regions in CRIU's hot-vmas.json format.
+// saveHotIOVsJSON writes hot VMA regions in CRIU's hot-iovs.json format.
 // This file is read by the lazy-pages daemon's prefetch engine to prioritize
 // fetching hot memory regions first during restore.
-func saveHotVMAsJSON(dumpDir string, hotRegions []profiler.HotRegion) error {
-	excluded := make([]hotVMAsEntry, len(hotRegions))
+func saveHotIOVsJSON(dumpDir string, hotRegions []profiler.HotRegion) error {
+	excluded := make([]hotIOVsEntry, len(hotRegions))
 	for i, r := range hotRegions {
-		excluded[i] = hotVMAsEntry{
+		excluded[i] = hotIOVsEntry{
 			Start: fmt.Sprintf("0x%x", r.StartAddr),
 			End:   fmt.Sprintf("0x%x", r.EndAddr),
 		}
 	}
 
-	j := hotVMAsJSON{
+	j := hotIOVsJSON{
 		Excluded: excluded,
-		NoParent: []hotVMAsEntry{},
+		NoParent: []hotIOVsEntry{},
 	}
 
 	data, err := json.MarshalIndent(j, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to marshal hot-vmas.json: %w", err)
+		return fmt.Errorf("failed to marshal hot-iovs.json: %w", err)
 	}
 
-	path := filepath.Join(dumpDir, "hot-vmas.json")
+	path := filepath.Join(dumpDir, "hot-iovs.json")
 	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("failed to write hot-vmas.json: %w", err)
+		return fmt.Errorf("failed to write hot-iovs.json: %w", err)
 	}
 
-	log.Printf("Saved hot-vmas.json (%d hot regions) to %s", len(hotRegions), path)
+	log.Printf("Saved hot-iovs.json (%d hot regions) to %s", len(hotRegions), path)
 	return nil
 }
 

@@ -142,7 +142,7 @@ spec:
                     type: boolean
                   expressOneZone:
                     type: boolean
-                  hotVMASeed:
+                  hotIOVSeed:
                     type: boolean
                   logUpload:
                     type: boolean

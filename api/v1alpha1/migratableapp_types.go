@@ -172,9 +172,9 @@ type StorageConfig struct {
 	// Set to false to disable (ablation: page-by-page fault handling only).
 	SemiSyncIOV *bool `json:"semiSyncIOV,omitempty"`
 
-	// HotVMASeed controls hot VMA priority seeding. Default: enabled when async prefetch is active.
+	// HotIOVSeed controls hot VMA priority seeding. Default: enabled when async prefetch is active.
 	// Set to false to disable (ablation: sequential prefetch only).
-	HotVMASeed *bool `json:"hotVMASeed,omitempty"`
+	HotIOVSeed *bool `json:"hotIOVSeed,omitempty"`
 
 	// LogUpload enables uploading all raw CRIU logs and stats to S3 after dump/restore.
 	// Uploaded files: criu.log, restore.log, lazy-pages.log, stats-dump, stats-restore,

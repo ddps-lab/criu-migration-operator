@@ -37,18 +37,32 @@ func NewRestoreManager(workDir string, s3Client *S3Client, podName, nodeName str
 func (m *RestoreManager) Restore(ctx context.Context, dumpID, s3Prefix string, useLazyPages bool, pageServerPort int, sourceAddr string, externalMounts map[string]string, strategy string, pipeInodes map[string]string) (*RestoreResult, *exec.Cmd, *exec.Cmd, error) {
 	startTime := time.Now()
 
-	// Download checkpoint data from storage
-	if strategy == "full" {
-		// full: download everything (metadata + pages) before restore
-		fmt.Printf("[%s] [TARGET-AGENT] Downloading full checkpoint from storage (strategy: full, prefix: %s)\n",
+	// Download checkpoint data from storage.
+	//   full          — agent downloads metadata + pages before restore.
+	//   lazy-storage  — nothing: CRIU's --enable-object-storage GETs every
+	//                   image (metadata.tar bundle then individual pages
+	//                   on lazy-pages fault) directly from S3, so a
+	//                   pre-download is pure overhead and racy with the
+	//                   source's S3 PUT completion.
+	//   lazy-direct   — download metadata only; pages live on the
+	//                   source's page-server. CRIU still needs the
+	//                   image inventory locally to spin lazy-pages up.
+	//   lazy-hybrid   — same as lazy-direct (S3 is the fallback for
+	//                   pages, but lazy-pages needs the metadata files
+	//                   locally before the page-server connection).
+	switch strategy {
+	case "full":
+		fmt.Printf("[%s] [TARGET-AGENT] Downloading full checkpoint from storage (prefix: %s)\n",
 			time.Now().Format("15:04:05.000"), s3Prefix)
 		if err := m.s3Client.DownloadFullCheckpoint(ctx, s3Prefix, m.workDir); err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to download full checkpoint: %w", err)
 		}
 		fmt.Printf("[%s] [TARGET-AGENT] Full checkpoint download completed\n",
 			time.Now().Format("15:04:05.000"))
-	} else {
-		// lazy-storage/lazy-direct/lazy-hybrid: download metadata only
+	case "lazy-storage":
+		fmt.Printf("[%s] [TARGET-AGENT] strategy=lazy-storage — skipping local download; CRIU --enable-object-storage will fetch from S3 (prefix: %s)\n",
+			time.Now().Format("15:04:05.000"), s3Prefix)
+	default: // lazy-direct, lazy-hybrid
 		if err := m.s3Client.DownloadMetadataOnly(ctx, s3Prefix, m.workDir); err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to download checkpoint metadata: %w", err)
 		}

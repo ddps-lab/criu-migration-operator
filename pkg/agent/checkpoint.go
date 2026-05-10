@@ -367,7 +367,7 @@ func (m *CheckpointManager) FinalDump(ctx context.Context, pid int, pageServerAd
 	case "full", "lazy-storage":
 		if directUpload {
 			// CRIU already uploaded pages + metadata to S3.
-			// Only upload agent-generated files (hot-vmas.json, hot_vma_metadata.json)
+			// Only upload agent-generated files (hot-iovs.json, hot_vma_metadata.json)
 			// that CRIU doesn't know about.
 			fmt.Printf("[%s] [SOURCE-AGENT] Direct upload mode — CRIU uploaded to S3, uploading agent metadata...\n",
 				time.Now().Format("15:04:05.000"))
@@ -382,30 +382,22 @@ func (m *CheckpointManager) FinalDump(ctx context.Context, pid int, pageServerAd
 			fmt.Printf("[%s] [SOURCE-AGENT] Storage upload completed: %s\n",
 				time.Now().Format("15:04:05.000"), s3Prefix)
 		}
-	case "lazy-hybrid":
-		// Async upload — page-server serves pages, storage is fallback
-		go func() {
-			uploadCtx := context.Background()
-			if err := m.s3Client.UploadCheckpoint(uploadCtx, dumpDir, s3Prefix); err != nil {
-				fmt.Printf("Failed to upload checkpoint to storage: %v\n", err)
-				return
-			}
-			fmt.Printf("Successfully uploaded checkpoint to storage: %s\n", s3Prefix)
-		}()
-	case "lazy-direct":
-		// Upload checkpoint metadata (pages served via page-server, but target needs
-		// metadata files to initialize lazy-pages daemon).
-		// With --lazy-pages dump, pages-*.img files are minimal (lazy stubs).
-		fmt.Printf("[%s] [SOURCE-AGENT] Uploading checkpoint metadata to storage (lazy-direct)\n",
-			time.Now().Format("15:04:05.000"))
-		go func() {
-			uploadCtx := context.Background()
-			if err := m.s3Client.UploadCheckpoint(uploadCtx, dumpDir, s3Prefix); err != nil {
-				fmt.Printf("Failed to upload checkpoint to storage: %v\n", err)
-				return
-			}
-			fmt.Printf("Successfully uploaded checkpoint to storage: %s\n", s3Prefix)
-		}()
+	case "lazy-hybrid", "lazy-direct":
+		// Page-server modes: the target lazy-pages daemon needs the
+		// metadata image files in S3 BEFORE its restore can start
+		// (DownloadMetadataOnly runs at the top of FinalDump's restore
+		// counterpart). The previous async path created a race where
+		// the target started its download before the source had
+		// finished PUTing — manifests as missing/short images during
+		// restore. Make the upload synchronous so this routine only
+		// returns once S3 has the metadata.
+		fmt.Printf("[%s] [SOURCE-AGENT] Uploading checkpoint metadata to storage (synchronous, %s)\n",
+			time.Now().Format("15:04:05.000"), strategy)
+		if err := m.s3Client.UploadCheckpoint(ctx, dumpDir, s3Prefix); err != nil {
+			return nil, nil, fmt.Errorf("failed to upload checkpoint metadata to storage: %w", err)
+		}
+		fmt.Printf("[%s] [SOURCE-AGENT] Storage upload completed: %s\n",
+			time.Now().Format("15:04:05.000"), s3Prefix)
 	}
 
 	// Upload raw logs if enabled
@@ -415,10 +407,10 @@ func (m *CheckpointManager) FinalDump(ctx context.Context, pid int, pageServerAd
 	return result, pageServerCmd, nil
 }
 
-// uploadAgentMetadata uploads agent-generated files (hot-vmas.json, etc.)
+// uploadAgentMetadata uploads agent-generated files (hot-iovs.json, etc.)
 // that CRIU's direct upload doesn't handle.
 func (m *CheckpointManager) uploadAgentMetadata(ctx context.Context, dumpDir, s3Prefix string) {
-	agentFiles := []string{"hot-vmas.json", "hot_vma_metadata.json"}
+	agentFiles := []string{"hot-iovs.json", "hot_vma_metadata.json"}
 	for _, name := range agentFiles {
 		path := filepath.Join(dumpDir, name)
 		if _, err := os.Stat(path); err != nil {
@@ -451,7 +443,7 @@ func (m *CheckpointManager) uploadLogs(ctx context.Context, dumpDir, s3Prefix, o
 		"stats-dump",
 		"stats-restore",
 		"hot_vma_metadata.json",
-		"hot-vmas.json",
+		"hot-iovs.json",
 		"exclude-ranges.txt",
 	}
 
