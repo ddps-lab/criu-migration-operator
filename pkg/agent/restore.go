@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -319,8 +320,28 @@ func (m *RestoreManager) StartPageServer(ctx context.Context, port int, checkpoi
 	if os.Getenv("ASYNC_PREFETCH") == "true" {
 		args = append(args, "--async-prefetch")
 
-		// Prefetch workers (default: CRIU's built-in default of 4)
-		if w := os.Getenv("PREFETCH_WORKERS"); w != "" {
+		// Prefetch workers. Priority:
+		//   1. PREFETCH_WORKERS env var (operator-injected when CRD's
+		//      Storage.PrefetchWorkers > 0).
+		//   2. Auto-derived from the instance NIC: paper's formula is
+		//      N = baseline_NIC_bandwidth ÷ single_connection_throughput
+		//      (~80 MB/s per main.md §motivation). For m5.8xlarge
+		//      (10 Gbps = 1250 MB/s) this gives 16; for m8i.8xlarge
+		//      (12.5 Gbps = 1562 MB/s) it gives 20.
+		//   3. CRIU's built-in default (4) if no detection succeeded.
+		w := os.Getenv("PREFETCH_WORKERS")
+		if w == "" {
+			if netInfo := DetectNetworkBandwidth(); netInfo != nil && netInfo.BaselineMBps > 0 {
+				const singleConnMBps = 80.0
+				n := int(math.Ceil(netInfo.BaselineMBps / singleConnMBps))
+				if n > 1 {
+					w = strconv.Itoa(n)
+					fmt.Printf("[TARGET-AGENT] prefetch-workers auto-derived: %d (baseline=%.0f MB/s / single=%.0f MB/s)\n",
+						n, netInfo.BaselineMBps, singleConnMBps)
+				}
+			}
+		}
+		if w != "" {
 			args = append(args, "--prefetch-workers", w)
 		}
 
