@@ -415,6 +415,25 @@ func (r *MigratableAppReconciler) fsmDumpingHandler(
 	sourcePod *corev1.Pod,
 ) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
+
+	// Re-fetch the latest mapp through the APIReader (uncached) so we
+	// short-circuit duplicate fsmDumpingHandler runs caused by the
+	// controller-runtime cache lagging behind a successful
+	// setStage(Uploaded). Without this guard a stale Dumping snapshot
+	// fires a second FinalDump RPC; CRIU has already terminated the
+	// workload process from the first dump, so the second call hits
+	// "readlink /proc/<pid>/ns/pid: no such file" and the FSM transitions
+	// to FinalDumpFailed even though the migration metadata is already
+	// safely on S3 from the first attempt.
+	fresh := &migrationv1alpha1.MigratableApp{}
+	if err := r.APIReader.Get(ctx, types.NamespacedName{Name: mapp.Name, Namespace: mapp.Namespace}, fresh); err == nil {
+		if fresh.Status.Migration.Stage != migrationv1alpha1.StageDumping {
+			logger.Info("FSM: stage already advanced — skipping duplicate fsmDumpingHandler",
+				"observed", fresh.Status.Migration.Stage)
+			return ctrl.Result{Requeue: true}, nil
+		}
+	}
+
 	strategy := mapp.Spec.MigrationPolicy.Strategy
 	if strategy == "" {
 		strategy = "lazy-storage"

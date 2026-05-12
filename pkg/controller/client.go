@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	pb "github.com/ddps-lab/criu-migration-operator/pkg/proto"
 	"google.golang.org/grpc"
@@ -24,9 +25,19 @@ func NewAgentClient(pod *corev1.Pod) (*AgentClient, error) {
 	}
 
 	addr := fmt.Sprintf("%s:8080", pod.Status.PodIP)
-	conn, err := grpc.Dial(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	// Pod.Status == Running doesn't guarantee the agent's gRPC server has
+	// finished its 1-2 s startup (network detect + AWS IMDS probe). Use
+	// WithBlock + a deadline so the dial polls until the server accepts
+	// or we hit the timeout, instead of returning a stale ConnectionState
+	// that fails on the first RPC.
+	dialCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conn, err := grpc.DialContext(dialCtx, addr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithBlock(),
+	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to agent: %w", err)
+		return nil, fmt.Errorf("failed to connect to agent at %s: %w", addr, err)
 	}
 
 	return &AgentClient{
