@@ -394,6 +394,14 @@ func (b *PodBuilder) BuildAgentContainer(mode string) corev1.Container {
 		Value: strconv.FormatBool(b.mapp.Spec.CheckpointPolicy.AutoAdjust),
 	})
 
+	// Temporary bisect knob: setting DISABLE_AUTO_PROFILER=true in the
+	// operator's env propagates here, letting us turn off the in-process
+	// userfaultfd-wp profiler. Useful when an uffd-related CRIU dump
+	// regression needs to be isolated.
+	if v := os.Getenv("DISABLE_AUTO_PROFILER"); v != "" {
+		agentEnv = append(agentEnv, corev1.EnvVar{Name: "DISABLE_AUTO_PROFILER", Value: v})
+	}
+
 	// Deadline/invariant config (used by agent when AUTO_ADJUST=true)
 	ds := b.mapp.Spec.CheckpointPolicy.DeadlineScheduler
 	if ds.DeadlineSeconds > 0 {
@@ -430,10 +438,11 @@ func (b *PodBuilder) BuildAgentContainer(mode string) corev1.Container {
 	}
 
 	return corev1.Container{
-		Name:  "criu-agent",
-		Image: AgentImage,
-		Args:  []string{"--mode=" + mode},
-		Env:   agentEnv,
+		Name:            "criu-agent",
+		Image:           AgentImage,
+		ImagePullPolicy: corev1.PullAlways,
+		Args:            []string{"--mode=" + mode},
+		Env:             agentEnv,
 		Ports: []corev1.ContainerPort{
 			{
 				Name:          "grpc",

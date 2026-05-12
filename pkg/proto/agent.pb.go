@@ -1447,7 +1447,7 @@ type GetDirtyVolumeResponse struct {
 	state                protoimpl.MessageState `protogen:"open.v1"`
 	DirtyPages           int64                  `protobuf:"varint,1,opt,name=dirty_pages,json=dirtyPages,proto3" json:"dirty_pages,omitempty"`
 	DirtyBytes           int64                  `protobuf:"varint,2,opt,name=dirty_bytes,json=dirtyBytes,proto3" json:"dirty_bytes,omitempty"`
-	DirtyRatePagesPerSec float64                `protobuf:"fixed64,3,opt,name=dirty_rate_pages_per_sec,json=dirtyRatePagesPerSec,proto3" json:"dirty_rate_pages_per_sec,omitempty"`
+	DirtyRatePagesPerSec float64                `protobuf:"fixed64,3,opt,name=dirty_rate_pages_per_sec,json=dirtyRatePagesPerSec,proto3" json:"dirty_rate_pages_per_sec,omitempty"` // DEPRECATED name: actual value is bytes/sec (not pages/sec)
 	CumulativeDirtyBytes int64                  `protobuf:"varint,4,opt,name=cumulative_dirty_bytes,json=cumulativeDirtyBytes,proto3" json:"cumulative_dirty_bytes,omitempty"`
 	AvgDirtyRate         float64                `protobuf:"fixed64,5,opt,name=avg_dirty_rate,json=avgDirtyRate,proto3" json:"avg_dirty_rate,omitempty"`
 	TimestampMs          int64                  `protobuf:"varint,6,opt,name=timestamp_ms,json=timestampMs,proto3" json:"timestamp_ms,omitempty"`

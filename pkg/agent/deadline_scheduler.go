@@ -307,6 +307,22 @@ func (s *InvariantScheduler) performInitialPreDump(ctx context.Context) {
 	log.Printf("[INVARIANT-SCHEDULER] Initial pre-dump completed: %s (size=%d bytes)",
 		result.DumpID, result.SizeBytes)
 
+	// CRIU's pre-dump exits with --leave-running, but the kernel needs a
+	// brief moment to fully unfreeze the cgroup and let the task reach
+	// TASK_RUNNING. Without this wait the next ptrace_attach issued by
+	// the profiler's setupUffdWP frequently races and observes "no such
+	// process" or "operation not permitted". Polling /proc/<pid>/status
+	// for TracerPid: 0 is the cheap correct check.
+	if s.agent.mainPID > 0 {
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if tpid, err := readTracerPid(s.agent.mainPID); err == nil && tpid == 0 {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+
 	// Start profiler AFTER initial pre-dump — D_current starts fresh from 0
 	if s.profiler == nil && s.agent.mainPID > 0 {
 		p := profiler.New(s.agent.mainPID, profiler.DefaultConfig())

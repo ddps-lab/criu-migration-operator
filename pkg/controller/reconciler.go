@@ -25,7 +25,12 @@ import (
 // MigratableAppReconciler reconciles a MigratableApp object
 type MigratableAppReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	// APIReader bypasses the controller-runtime cache. We use it for
+	// status reads that must observe the freshest API state (e.g. the
+	// fsmUploadedHandler duplicate-reconcile guard where the cache may
+	// still report Stage=Uploaded after a setStage(Restoring) update).
+	APIReader client.Reader
+	Scheme    *runtime.Scheme
 }
 
 // +kubebuilder:rbac:groups=migration.io,resources=migratableapps,verbs=get;list;watch;create;update;patch;delete
@@ -34,6 +39,8 @@ type MigratableAppReconciler struct {
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups=apps,resources=replicasets,verbs=get;list;watch
 
 const (
 	finalizerName = "migration.io/cleanup"
@@ -85,6 +92,13 @@ func (r *MigratableAppReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{Requeue: true}, nil
 	}
 
+	// User-driven recovery: migration.io/retry=requested annotation on
+	// a terminally-failed mapp resets the FSM so the next reconcile
+	// recreates a fresh source pod via createInitialPod.
+	if handled, res, err := r.checkRetryAnnotation(ctx, &mapp); handled {
+		return res, err
+	}
+
 	// Webhook-managed MigratableApps: pod lifecycle is owned by Deployment/StatefulSet,
 	// not by the controller. Only perform checkpoints and migration.
 	if mapp.Labels != nil && mapp.Labels["migration.io/webhook-managed"] == "true" {
@@ -101,6 +115,14 @@ func (r *MigratableAppReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		}
 		logger.Error(err, "Failed to get current pod")
 		return ctrl.Result{}, err
+	}
+
+	// FSM dispatch: if a migration is already in flight or a terminal
+	// failure is awaiting a user retry annotation, the per-stage handler
+	// runs instead of re-entering the full performMigration pipeline.
+	// This is what fixes the RestoreFailed retry storm.
+	if mapp.Status.Migration.Stage != migrationv1alpha1.StageIdle {
+		return r.advanceMigrationFSM(ctx, &mapp, pod)
 	}
 
 	// Check if migration is needed
@@ -283,13 +305,29 @@ func (r *MigratableAppReconciler) getCurrentPod(ctx context.Context, mapp *migra
 }
 
 // needsMigration checks if migration is needed
+// needsMigration reports whether we should KICK OFF a fresh migration
+// for this mapp. It does NOT cover "migration is already in flight" —
+// the caller handles that separately via the FSM stage gate. So this
+// function refuses to start a new migration whenever:
+//
+//   - an FSM stage is already set (the FSM owns the workload), or
+//   - the workload's auto-migrate policy is off, or
+//   - the pod is not currently scheduled to a node we can inspect.
+//
+// Otherwise the usual triggers (manual annotation, node cordon) apply.
 func (r *MigratableAppReconciler) needsMigration(ctx context.Context, mapp *migrationv1alpha1.MigratableApp, pod *corev1.Pod) (bool, string) {
-	// Check if auto-migrate is disabled
+	// FSM owns the workload while a migration is in flight or a
+	// terminal failure is waiting on a user retry annotation. Either
+	// way, no new migration kicks off here.
+	if mapp.Status.Migration.Stage != migrationv1alpha1.StageIdle {
+		return false, ""
+	}
+
 	if !mapp.Spec.MigrationPolicy.AutoMigrate {
 		return false, ""
 	}
 
-	// Check annotation for manual trigger
+	// Manual trigger via pod annotation.
 	if pod.Annotations["migration.io/trigger"] == "requested" {
 		reason := pod.Annotations["migration.io/reason"]
 		if reason == "" {
@@ -298,7 +336,7 @@ func (r *MigratableAppReconciler) needsMigration(ctx context.Context, mapp *migr
 		return true, reason
 	}
 
-	// Check if node is unschedulable (spot interrupt)
+	// Spot-interrupt: node cordoned.
 	if pod.Spec.NodeName != "" {
 		node := &corev1.Node{}
 		if err := r.Get(ctx, client.ObjectKey{Name: pod.Spec.NodeName}, node); err == nil {
@@ -351,19 +389,26 @@ func (r *MigratableAppReconciler) waitForPodRunning(ctx context.Context, pod *co
 // shouldPerformCheckpoint determines if a checkpoint should be performed now.
 // Uses time-based scheduling by default; when autoAdjust is enabled,
 // also considers dirty volume from the profiler.
+//
+// The first pre-checkpoint is delayed by initialPreCheckpointDelay so the
+// workload has time to finish its startup (numpy matrix init, etc.). CRIU
+// pre-dump mid-init can race against the workload's own ptrace-sensitive
+// setup paths and produce a checkpoint of an unfinished process.
 func shouldPerformCheckpoint(mapp *migrationv1alpha1.MigratableApp) bool {
-	// Parse checkpoint interval
+	const initialPreCheckpointDelay = 60 * time.Second
+
 	interval, err := time.ParseDuration(mapp.Spec.CheckpointPolicy.Interval)
 	if err != nil || interval == 0 {
 		return false
 	}
 
-	// If no checkpoint has been performed yet, perform one
 	if mapp.Status.CheckpointStatus.LastCheckpointTime.IsZero() {
-		return true
+		if mapp.CreationTimestamp.IsZero() {
+			return true
+		}
+		return time.Since(mapp.CreationTimestamp.Time) >= initialPreCheckpointDelay
 	}
 
-	// Check if enough time has passed since last checkpoint
 	elapsed := time.Since(mapp.Status.CheckpointStatus.LastCheckpointTime.Time)
 	return elapsed >= interval
 }
@@ -595,7 +640,16 @@ func (r *MigratableAppReconciler) reconcileWebhookManaged(ctx context.Context, m
 		}
 	}
 
+	// FSM dispatch: same gate as the main Reconcile path. While an FSM
+	// stage is set, the per-stage handler runs instead of restarting
+	// the migration pipeline. Replaces the old "Phase == Migrating"
+	// skip below (which only caught one stage of the lifecycle).
+	if mapp.Status.Migration.Stage != migrationv1alpha1.StageIdle {
+		return r.advanceMigrationFSM(ctx, mapp, pod)
+	}
+
 	// Skip if already migrating (prevent race condition from multiple reconciles)
+	// Left as a belt-and-suspenders guard; the FSM gate above is the real check.
 	if mapp.Status.Phase == "Migrating" {
 		logger.Info("Webhook-managed app already migrating, waiting")
 		return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
@@ -672,6 +726,48 @@ func (r *MigratableAppReconciler) SetupWithManager(mgr ctrl.Manager) error {
 						Namespace: pod.Namespace,
 					},
 				}}
+			},
+		)).
+		// Watch Node events: when a node becomes Unschedulable (cordon
+		// — most commonly because node-monitor saw an EC2 spot
+		// termination notice via IMDS), enqueue every MigratableApp
+		// whose source pod lives on that node. Without this watch the
+		// controller only notices the cordon on its 10–30 s reconcile
+		// poll, adding tens of seconds to migration latency.
+		Watches(&corev1.Node{}, handler.EnqueueRequestsFromMapFunc(
+			func(ctx context.Context, obj client.Object) []reconcile.Request {
+				node, ok := obj.(*corev1.Node)
+				if !ok || !node.Spec.Unschedulable {
+					return nil
+				}
+				// Find every mapp whose source pod is on this node.
+				var mapps migrationv1alpha1.MigratableAppList
+				if err := r.List(ctx, &mapps); err != nil {
+					return nil
+				}
+				reqs := []reconcile.Request{}
+				for _, m := range mapps.Items {
+					var pod corev1.Pod
+					podKey := types.NamespacedName{
+						Namespace: m.Namespace,
+						Name:      m.Status.CurrentPodName,
+					}
+					if m.Status.CurrentPodName == "" {
+						continue
+					}
+					if err := r.Get(ctx, podKey, &pod); err != nil {
+						continue
+					}
+					if pod.Spec.NodeName == node.Name {
+						reqs = append(reqs, reconcile.Request{
+							NamespacedName: types.NamespacedName{
+								Namespace: m.Namespace,
+								Name:      m.Name,
+							},
+						})
+					}
+				}
+				return reqs
 			},
 		)).
 		Complete(r)

@@ -102,6 +102,52 @@ type MigrationPolicy struct {
 	// MigrationTimeoutSeconds is the timeout for migration operation
 	// +kubebuilder:default=300
 	MigrationTimeoutSeconds int `json:"migrationTimeoutSeconds,omitempty"`
+
+	// PreDumpQuiesce, when set, makes the controller stop external
+	// load generators before invoking FinalDump on the source. Used to
+	// drain in-flight requests against the workload (e.g. a YCSB Java
+	// client targeting a redis-server mapp) so the dump captures a
+	// quiescent process tree.
+	//
+	// Without this hook the load generator keeps issuing TCP requests
+	// against the soon-to-be-frozen server, sometimes faster than CRIU's
+	// freezer can keep up, producing dump-time race failures. With it,
+	// the controller sends SIGTERM (or scales the load generator's
+	// Deployment to zero), waits DrainSeconds for the pods to exit,
+	// then proceeds with FinalDump.
+	PreDumpQuiesce *PreDumpQuiesce `json:"preDumpQuiesce,omitempty"`
+}
+
+// PreDumpQuiesce describes how to stop external load-generator pods
+// before the controller fires FinalDump. The selector matches pods in
+// the same namespace as the MigratableApp.
+type PreDumpQuiesce struct {
+	// TargetPodSelector matches the load-generator pods to drain. The
+	// match is by labels in the same namespace; only running pods are
+	// considered. Empty selector → no-op.
+	TargetPodSelector map[string]string `json:"targetPodSelector,omitempty"`
+
+	// DrainSeconds caps how long the controller waits for matched pods
+	// to actually terminate after the quiesce action. After this
+	// timeout the controller proceeds with FinalDump anyway so a
+	// stubborn load generator doesn't deadlock the migration.
+	// +kubebuilder:default=5
+	DrainSeconds int32 `json:"drainSeconds,omitempty"`
+
+	// Action selects the quiesce mechanism:
+	//   "sigterm" (default) — delete the matched pods via the
+	//     Kubernetes API, which sends SIGTERM and respects the pod's
+	//     terminationGracePeriodSeconds. Good for stateless YCSB
+	//     drivers and other pod-managed-by-Job/Deployment patterns.
+	//   "scale-zero" — find the matched pods' owner Deployments and
+	//     patch replicas=0. Use when the load generator is owned by a
+	//     Deployment and you want it to stay scaled-to-zero across the
+	//     migration window (the user / external script restores
+	//     replicas later).
+	//
+	// +kubebuilder:validation:Enum=sigterm;scale-zero
+	// +kubebuilder:default=sigterm
+	Action string `json:"action,omitempty"`
 }
 
 // SpotInterruptionHandling defines spot instance interruption detection configuration
@@ -203,11 +249,124 @@ type MigratableAppStatus struct {
 	// CheckpointStatus contains checkpoint information
 	CheckpointStatus CheckpointStatus `json:"checkpointStatus,omitempty"`
 
+	// Migration contains the FSM state of an in-flight or recently-failed
+	// migration. The reconciler dispatches per Migration.Stage instead of
+	// re-running the full dump+restore pipeline on every reconcile.
+	Migration MigrationStatusInfo `json:"migration,omitempty"`
+
 	// Conditions represent the latest available observations of an object's state
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 
 	// LastUpdateTime is the last time the status was updated
 	LastUpdateTime metav1.Time `json:"lastUpdateTime,omitempty"`
+}
+
+// MigrationStage is the FSM state of a migration in flight.
+//
+// Idle (empty string) and PreCheckpointing are normal Running states.
+// Dumping → Uploaded → Restoring is the success path. RestoreFailed is
+// retryable (loops back to Uploaded for a fresh target pod).
+// FinalDumpFailed and Failed are terminal — the reconciler stops
+// auto-retry and waits for an explicit migration.io/retry=requested
+// annotation from the user.
+//
+// The Idle stage is represented by the empty string and is not listed
+// in the enum validation. controller-gen's enum tag does not handle
+// empty strings cleanly and Status subresource fields are not
+// admission-validated in practice anyway; the only place that compares
+// against StageIdle is the reconciler.
+//
+// +kubebuilder:validation:Enum=PreCheckpointing;Quiescing;Dumping;Uploaded;Restoring;RestoreFailed;FinalDumpFailed;Failed
+type MigrationStage string
+
+const (
+	// StageIdle: workload Running, no migration in flight.
+	StageIdle MigrationStage = ""
+	// StagePreCheckpointing: workload Running, scheduled pre-dump in flight.
+	StagePreCheckpointing MigrationStage = "PreCheckpointing"
+	// StageQuiescing: load-generator pods are being stopped before
+	// FinalDump. Only entered when migrationPolicy.preDumpQuiesce is
+	// set on the mapp; otherwise Idle goes straight to Dumping.
+	StageQuiescing MigrationStage = "Quiescing"
+	// StageDumping: final dump RPC issued, waiting for completion.
+	StageDumping MigrationStage = "Dumping"
+	// StageUploaded: source dumped + S3 upload done. Next: spawn target +
+	// call Restore RPC.
+	StageUploaded MigrationStage = "Uploaded"
+	// StageRestoring: target pod up, Restore RPC issued, waiting for the
+	// restored process to be ready.
+	StageRestoring MigrationStage = "Restoring"
+	// StageRestoreFailed: restore on target failed. Reconciler will, after
+	// backoff, delete the failed target pod, increment RetryCount, and
+	// transition back to Uploaded so a fresh target pod retries with the
+	// existing S3 checkpoint. Terminal when RetryCount > MaxRetries.
+	StageRestoreFailed MigrationStage = "RestoreFailed"
+	// StageFinalDumpFailed: final dump RPC failed. Source state is
+	// indeterminate (lazy-storage kills source after dump); we do not
+	// auto-retry. User must annotate migration.io/retry=requested.
+	StageFinalDumpFailed MigrationStage = "FinalDumpFailed"
+	// StageFailed: terminal failure after exhausting retries. Same
+	// recovery path as FinalDumpFailed (user annotation).
+	StageFailed MigrationStage = "Failed"
+)
+
+// MigrationStatusInfo tracks the FSM of an in-flight or recently-failed
+// migration. Populated by the reconciler; do not edit by hand.
+type MigrationStatusInfo struct {
+	// Stage is the current FSM state.
+	Stage MigrationStage `json:"stage,omitempty"`
+
+	// RetryCount counts RestoreFailed retries for the current migration
+	// attempt. Reset to 0 when the migration completes or the user
+	// requests a fresh retry via annotation.
+	RetryCount int32 `json:"retryCount,omitempty"`
+
+	// MaxRetries caps RetryCount. Default 3. When RetryCount > MaxRetries
+	// the FSM transitions to Failed.
+	// +kubebuilder:default=3
+	MaxRetries int32 `json:"maxRetries,omitempty"`
+
+	// LastError is the most recent error message that caused a stage
+	// transition (e.g. "lazy-pages did not become ready: timeout").
+	LastError string `json:"lastError,omitempty"`
+
+	// LastTransitionTime is when Stage last changed. Used for backoff
+	// timing in RestoreFailed.
+	LastTransitionTime metav1.Time `json:"lastTransitionTime,omitempty"`
+
+	// UploadedDumpID is the dump that finished and was pushed to S3. The
+	// Uploaded → Restoring transition uses this to restore the same
+	// checkpoint on a fresh target pod across retries.
+	UploadedDumpID string `json:"uploadedDumpID,omitempty"`
+
+	// UploadedS3Prefix is the S3 object prefix where UploadedDumpID's
+	// metadata + pages live. Passed to the target agent's Restore RPC.
+	UploadedS3Prefix string `json:"uploadedS3Prefix,omitempty"`
+
+	// UploadedPipeInodes carries the source workload's stdout/stderr pipe
+	// inodes recorded at dump time. Forwarded to the target agent so it
+	// can rewire those fds via --inherit-fd, preventing SIGPIPE when the
+	// restored process writes to its now-orphaned containerd log pipe.
+	UploadedPipeInodes map[string]string `json:"uploadedPipeInodes,omitempty"`
+
+	// PreviousNode is where the source pod ran. Used to skip scheduling
+	// target pods back onto the cordoned node.
+	PreviousNode string `json:"previousNode,omitempty"`
+
+	// CurrentTargetPod is the name of the target pod we are currently
+	// restoring into. Empty between attempts.
+	CurrentTargetPod string `json:"currentTargetPod,omitempty"`
+
+	// MigrationReason is the trigger that initiated the migration
+	// (spot-interrupt, manual, etc.). Carried across retries so the
+	// success record in MigrationHistory is accurate.
+	MigrationReason string `json:"migrationReason,omitempty"`
+
+	// PageServerAddr / PageServerPort are populated for lazy-direct and
+	// lazy-hybrid strategies so a Restoring → RestoreFailed → Restoring
+	// retry can reconnect to the same source page-server.
+	PageServerAddr string `json:"pageServerAddr,omitempty"`
+	PageServerPort int32  `json:"pageServerPort,omitempty"`
 }
 
 // MigrationRecord represents a single migration event

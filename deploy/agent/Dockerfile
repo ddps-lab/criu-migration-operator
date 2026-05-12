@@ -37,6 +37,7 @@ RUN apt-get update && apt-get install -y \
     libcurl4 \
     libssl3 \
     util-linux \
+    iptables \
     curl \
     && curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" \
     && chmod +x kubectl \

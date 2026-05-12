@@ -44,6 +44,7 @@ spec:
               checkpointPolicy:
                 properties:
                   autoAdjust:
+                    default: true
                     type: boolean
                   deadlineScheduler:
                     properties:
@@ -84,6 +85,23 @@ spec:
                   migrationTimeoutSeconds:
                     default: 300
                     type: integer
+                  preDumpQuiesce:
+                    properties:
+                      action:
+                        default: sigterm
+                        enum:
+                        - sigterm
+                        - scale-zero
+                        type: string
+                      drainSeconds:
+                        default: 5
+                        format: int32
+                        type: integer
+                      targetPodSelector:
+                        additionalProperties:
+                          type: string
+                        type: object
+                    type: object
                   preferOnDemand:
                     default: true
                     type: boolean
@@ -134,12 +152,12 @@ spec:
                     type: string
                   credentialsSecret:
                     type: string
+                  directUpload:
+                    type: boolean
                   downloadEndpoint:
                     type: string
                   endpoint:
                     type: string
-                  directUpload:
-                    type: boolean
                   expressOneZone:
                     type: boolean
                   hotIOVSeed:
@@ -4005,6 +4023,51 @@ spec:
               lastUpdateTime:
                 format: date-time
                 type: string
+              migration:
+                properties:
+                  currentTargetPod:
+                    type: string
+                  lastError:
+                    type: string
+                  lastTransitionTime:
+                    format: date-time
+                    type: string
+                  maxRetries:
+                    default: 3
+                    format: int32
+                    type: integer
+                  migrationReason:
+                    type: string
+                  pageServerAddr:
+                    type: string
+                  pageServerPort:
+                    format: int32
+                    type: integer
+                  previousNode:
+                    type: string
+                  retryCount:
+                    format: int32
+                    type: integer
+                  stage:
+                    enum:
+                    - PreCheckpointing
+                    - Quiescing
+                    - Dumping
+                    - Uploaded
+                    - Restoring
+                    - RestoreFailed
+                    - FinalDumpFailed
+                    - Failed
+                    type: string
+                  uploadedDumpID:
+                    type: string
+                  uploadedPipeInodes:
+                    additionalProperties:
+                      type: string
+                    type: object
+                  uploadedS3Prefix:
+                    type: string
+                type: object
               migrationHistory:
                 items:
                   properties:

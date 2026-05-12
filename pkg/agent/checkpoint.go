@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -220,7 +221,7 @@ func (m *CheckpointManager) FinalDump(ctx context.Context, pid int, pageServerAd
 		"-t", strconv.Itoa(pid),
 		"-D", dumpDir,
 		"--root", fmt.Sprintf("/proc/%d/root", pid),
-		"--tcp-established",
+		"--tcp-close",
 		"--shell-job",
 		"-v4",
 		"--log-file", filepath.Join(dumpDir, "criu.log"),
@@ -274,6 +275,19 @@ func (m *CheckpointManager) FinalDump(ctx context.Context, pid int, pageServerAd
 			inode = strings.TrimSuffix(inode, "]")
 			pipeInodes[label] = inode
 			fmt.Printf("[SOURCE-AGENT] Recorded pipe fd %d inode %s as %s\n", fd, inode, label)
+		}
+	}
+
+	// Persist pipe inodes into the dump bundle as a fallback for the
+	// target agent. The FSM also propagates this via CRD status, but
+	// writing the JSON here means a restore can recover the mapping
+	// from the on-disk bundle even when the status is missing.
+	if len(pipeInodes) > 0 {
+		if data, err := json.Marshal(pipeInodes); err == nil {
+			pipePath := filepath.Join(dumpDir, "pipe_inodes.json")
+			if err := os.WriteFile(pipePath, data, 0644); err != nil {
+				fmt.Printf("[SOURCE-AGENT] Warning: failed to write pipe_inodes.json: %v\n", err)
+			}
 		}
 	}
 
@@ -410,7 +424,7 @@ func (m *CheckpointManager) FinalDump(ctx context.Context, pid int, pageServerAd
 // uploadAgentMetadata uploads agent-generated files (hot-iovs.json, etc.)
 // that CRIU's direct upload doesn't handle.
 func (m *CheckpointManager) uploadAgentMetadata(ctx context.Context, dumpDir, s3Prefix string) {
-	agentFiles := []string{"hot-iovs.json", "hot_vma_metadata.json"}
+	agentFiles := []string{"hot-iovs.json", "hot_vma_metadata.json", "pipe_inodes.json"}
 	for _, name := range agentFiles {
 		path := filepath.Join(dumpDir, name)
 		if _, err := os.Stat(path); err != nil {

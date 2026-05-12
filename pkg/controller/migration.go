@@ -22,8 +22,27 @@ import (
 // deployments should leave this annotation off so resources are cleaned up.
 const debugPreserveSourcePodAnnotation = "migration.io/debug-preserve-source-pod"
 
-// performMigration performs the actual migration process
+// performMigration is the top-level entrypoint Reconcile calls when
+// needsMigration() returns true. All strategies now flow through the
+// FSM in migration_fsm.go; the legacy monolithic path below is kept
+// only as a fallback for the (unreachable today) "full" strategy and
+// any future strategy that has not been ported to the FSM. Callers
+// should not invoke performMigrationLegacy directly.
 func (r *MigratableAppReconciler) performMigration(
+	ctx context.Context,
+	mapp *migrationv1alpha1.MigratableApp,
+	sourcePod *corev1.Pod,
+	reason string,
+) (ctrl.Result, error) {
+	return r.startMigration(ctx, mapp, sourcePod, reason)
+}
+
+// performMigrationLegacy is the original monolithic migration pipeline.
+// Retained as a reference implementation and an emergency fallback;
+// not reachable from performMigration today.
+//
+//nolint:unused
+func (r *MigratableAppReconciler) performMigrationLegacy(
 	ctx context.Context,
 	mapp *migrationv1alpha1.MigratableApp,
 	sourcePod *corev1.Pod,
@@ -32,7 +51,7 @@ func (r *MigratableAppReconciler) performMigration(
 	logger := log.FromContext(ctx)
 	startTime := time.Now()
 
-	logger.Info("Starting migration",
+	logger.Info("Starting migration (legacy path)",
 		"sourcePod", sourcePod.Name,
 		"sourceNode", sourcePod.Spec.NodeName,
 		"reason", reason)

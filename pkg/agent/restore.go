@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
@@ -39,12 +40,14 @@ func (m *RestoreManager) Restore(ctx context.Context, dumpID, s3Prefix string, u
 	startTime := time.Now()
 
 	// Download checkpoint data from storage.
-	//   full          — agent downloads metadata + pages before restore.
+	//   full          — agent downloads metadata + pages.
 	//   lazy-storage  — nothing: CRIU's --enable-object-storage GETs every
 	//                   image (metadata.tar bundle then individual pages
 	//                   on lazy-pages fault) directly from S3, so a
 	//                   pre-download is pure overhead and racy with the
-	//                   source's S3 PUT completion.
+	//                   source's S3 PUT completion. We only mkdir the
+	//                   images-dir locally — CRIU writes any files it
+	//                   chooses to land on disk there.
 	//   lazy-direct   — download metadata only; pages live on the
 	//                   source's page-server. CRIU still needs the
 	//                   image inventory locally to spin lazy-pages up.
@@ -61,8 +64,16 @@ func (m *RestoreManager) Restore(ctx context.Context, dumpID, s3Prefix string, u
 		fmt.Printf("[%s] [TARGET-AGENT] Full checkpoint download completed\n",
 			time.Now().Format("15:04:05.000"))
 	case "lazy-storage":
-		fmt.Printf("[%s] [TARGET-AGENT] strategy=lazy-storage — skipping local download; CRIU --enable-object-storage will fetch from S3 (prefix: %s)\n",
-			time.Now().Format("15:04:05.000"), s3Prefix)
+		// CRIU expects images-dir to exist on disk even though it fetches
+		// inventory.img + metadata via --enable-object-storage. Without
+		// the dir, lazy-pages prints "Can't open dir <X>: No such file
+		// or directory" before it ever issues an S3 request.
+		dumpDir := filepath.Join(m.workDir, dumpID)
+		if err := os.MkdirAll(dumpDir, 0o755); err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to mkdir lazy-storage images-dir: %w", err)
+		}
+		fmt.Printf("[%s] [TARGET-AGENT] strategy=lazy-storage — mkdir %s; CRIU --enable-object-storage will fetch inventory + pages from S3 (prefix: %s)\n",
+			time.Now().Format("15:04:05.000"), dumpDir, s3Prefix)
 	default: // lazy-direct, lazy-hybrid
 		if err := m.s3Client.DownloadMetadataOnly(ctx, s3Prefix, m.workDir); err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to download checkpoint metadata: %w", err)
@@ -152,7 +163,7 @@ func (m *RestoreManager) Restore(ctx context.Context, dumpID, s3Prefix string, u
 		"restore",
 		"-D", dumpDir,
 		"--pidfile", pidFile,
-		"--tcp-established",
+		"--tcp-close",
 		"--shell-job",
 		"-v4",
 		"--log-file", filepath.Join(dumpDir, "restore.log"),
@@ -201,6 +212,22 @@ func (m *RestoreManager) Restore(ctx context.Context, dumpID, s3Prefix string, u
 	// Agent holds the read-end to drain output and prevent SIGPIPE.
 	extraFiles := []*os.File{pidNsFd} // fd3=pidns
 	fdIndex := 4                       // next available fd for ExtraFiles
+
+	// Fallback: if the caller didn't propagate pipeInodes via CRD status,
+	// recover them from the dump bundle (pipe_inodes.json written at dump
+	// time and uploaded alongside the metadata). Without this rewire the
+	// restored process inherits an orphan pipe with no reader, so the
+	// first stdout write SIGPIPEs the workload silently.
+	if len(pipeInodes) == 0 {
+		bundlePath := filepath.Join(dumpDir, "pipe_inodes.json")
+		if data, err := os.ReadFile(bundlePath); err == nil {
+			recovered := map[string]string{}
+			if err := json.Unmarshal(data, &recovered); err == nil && len(recovered) > 0 {
+				pipeInodes = recovered
+				fmt.Printf("[TARGET-AGENT] Recovered pipeInodes from bundle: %v\n", pipeInodes)
+			}
+		}
+	}
 
 	// Replace dumped pipes with new pipe pairs using --inherit-fd fd[N]:pipe:[inode]
 	// Format: pipe:[inode] (with colon before bracket, matching /proc/pid/fd symlink format)
@@ -383,7 +410,10 @@ func (m *RestoreManager) StartPageServer(ctx context.Context, port int, checkpoi
 	logPath := filepath.Join(checkpointDir, "lazy-pages.log")
 	fmt.Printf("[%s] [TARGET-AGENT] Waiting for lazy-pages to connect to page-server...\n",
 		time.Now().Format("15:04:05.000"))
-	if err := m.waitForLazyPagesReady(logPath, 10*time.Second); err != nil {
+	if err := m.waitForLazyPagesReady(logPath, 60*time.Second); err != nil {
+		// Dump the lazy-pages.log so we can see what CRIU was doing when it stalled.
+		fmt.Printf("[%s] [TARGET-AGENT] lazy-pages did not become ready — log tail:\n%s\n",
+			time.Now().Format("15:04:05.000"), m.readLogFile(logPath, 80))
 		if cmd.Process != nil {
 			cmd.Process.Kill()
 		}

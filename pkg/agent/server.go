@@ -57,6 +57,26 @@ type Agent struct {
 }
 
 // NewAgent creates a new CRIU agent
+// readTracerPid returns the TracerPid field from /proc/<pid>/status.
+// Returns 0 when no tracer is attached.
+func readTracerPid(pid int) (int, error) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		return 0, err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "TracerPid:") {
+			continue
+		}
+		f := strings.Fields(line)
+		if len(f) < 2 {
+			return 0, fmt.Errorf("malformed TracerPid line: %q", line)
+		}
+		return strconv.Atoi(f[1])
+	}
+	return 0, fmt.Errorf("TracerPid not found in /proc/%d/status", pid)
+}
+
 func NewAgent(workDir, s3Bucket, s3Endpoint, s3Region, mode, podName, nodeName string) (*Agent, error) {
 	// Read additional S3 options from environment
 	downloadEndpoint := os.Getenv("DOWNLOAD_ENDPOINT")
@@ -100,8 +120,10 @@ func (a *Agent) Start(ctx context.Context, port int) error {
 			// Continue anyway - user can manually investigate
 		}
 
-		// Auto-start profiler after user process is running
-		if a.mainPID > 0 {
+		// Auto-start profiler after user process is running.
+		// Set DISABLE_AUTO_PROFILER=true to skip — useful when bisecting
+		// a profiler-induced CRIU dump regression.
+		if a.mainPID > 0 && os.Getenv("DISABLE_AUTO_PROFILER") != "true" {
 			go a.autoStartProfiler(ctx)
 		}
 	}
@@ -272,6 +294,28 @@ func (a *Agent) FinalDump(ctx context.Context, req *pb.FinalDumpRequest) (*pb.Fi
 		savedHotRegions = a.profilerInst.GetHotRegions()
 		savedVMADetails = a.profilerInst.GetVMADetails()
 		a.profilerInst.CleanupBeforeCRIU()
+		// Fully release the profiler: closes pagemap fd + tracker uffd fd.
+		// CleanupBeforeCRIU already stopped the loop and closed the target
+		// uffd FD via ptrace; this also releases the agent-side tracker fd
+		// so CRIU sees no profiler-related handles on the agent side.
+		a.profilerInst.Close()
+		a.profilerInst = nil
+
+		// Wait for the kernel ptrace_attach state on the target to clear.
+		// PTRACE_DETACH returns immediately, but TASK_TRACED → TASK_RUNNING
+		// has a few microseconds of scheduling delay; CRIU's next
+		// PTRACE_SEIZE has been observed to race against this and fail
+		// with "Unable to interrupt task: <pid> (Operation not permitted)".
+		// Poll /proc/<pid>/status until TracerPid is 0.
+		if a.mainPID > 0 {
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) {
+				if tpid, err := readTracerPid(a.mainPID); err == nil && tpid == 0 {
+					break
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+		}
 
 		// Final dump: --exclude-range only (triggers has_parent=false for full dump)
 		excludeArgs = &CRIUExcludeArgs{}
