@@ -365,6 +365,24 @@ func (b *PodBuilder) BuildAgentContainer(mode string) corev1.Container {
 			Value: "true",
 		})
 	}
+	if b.mapp.Spec.Storage.Compress {
+		agentEnv = append(agentEnv, corev1.EnvVar{
+			Name:  "CRIU_COMPRESS",
+			Value: "true",
+		})
+		if b.mapp.Spec.Storage.CompressLevel > 0 {
+			agentEnv = append(agentEnv, corev1.EnvVar{
+				Name:  "CRIU_COMPRESS_LEVEL",
+				Value: strconv.Itoa(b.mapp.Spec.Storage.CompressLevel),
+			})
+		}
+		if b.mapp.Spec.Storage.CompressWorkers > 0 {
+			agentEnv = append(agentEnv, corev1.EnvVar{
+				Name:  "CRIU_COMPRESS_WORKERS",
+				Value: strconv.Itoa(b.mapp.Spec.Storage.CompressWorkers),
+			})
+		}
+	}
 
 	// Add POD_GENERATION from annotation via Downward API (set in buildBasePod)
 	agentEnv = append(agentEnv, corev1.EnvVar{

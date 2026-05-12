@@ -114,6 +114,19 @@ func (m *CheckpointManager) PreCheckpoint(ctx context.Context, pid int, parentDu
 		args = append(args, m.s3Client.BuildCRIUUploadArgs(s3Prefix)...)
 	}
 
+	// zstd seekable compression for pages-*.img (paper §design:storage).
+	// Restore + lazy-pages auto-detect compressed images, but we still pass
+	// --compress to them so CRIU honours the seekable format end-to-end.
+	if os.Getenv("CRIU_COMPRESS") == "true" {
+		args = append(args, "--compress")
+		if lvl := os.Getenv("CRIU_COMPRESS_LEVEL"); lvl != "" {
+			args = append(args, "--compress-level", lvl)
+		}
+		if w := os.Getenv("CRIU_COMPRESS_WORKERS"); w != "" {
+			args = append(args, "--compress-workers", w)
+		}
+	}
+
 	// Execute CRIU dump directly from agent container
 	// We DON'T need nsenter for dump because:
 	// 1. Shared PID namespace lets us see main container's processes
@@ -244,6 +257,17 @@ func (m *CheckpointManager) FinalDump(ctx context.Context, pid int, pageServerAd
 	if directUpload {
 		s3Prefix := m.getS3Prefix(dumpID)
 		args = append(args, m.s3Client.BuildCRIUUploadArgs(s3Prefix)...)
+	}
+
+	// zstd seekable compression on pages-*.img (paper §design:storage).
+	if os.Getenv("CRIU_COMPRESS") == "true" {
+		args = append(args, "--compress")
+		if lvl := os.Getenv("CRIU_COMPRESS_LEVEL"); lvl != "" {
+			args = append(args, "--compress-level", lvl)
+		}
+		if w := os.Getenv("CRIU_COMPRESS_WORKERS"); w != "" {
+			args = append(args, "--compress-workers", w)
+		}
 	}
 
 	// Mark PID namespace as external (will be injected via inherit-fd during restore)

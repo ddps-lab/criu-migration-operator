@@ -200,6 +200,17 @@ func (m *RestoreManager) Restore(ctx context.Context, dumpID, s3Prefix string, u
 		args = append(args, "--lazy-pages")
 	}
 
+	// zstd seekable compression — required end-to-end so CRIU writes the
+	// compressed image bookkeeping consistently. Restore auto-detects per
+	// CRIU's docs, but passing the flag here matches the dump invocation
+	// and avoids any ambiguity for future CRIU revisions.
+	if os.Getenv("CRIU_COMPRESS") == "true" {
+		args = append(args, "--compress")
+		if lvl := os.Getenv("CRIU_COMPRESS_LEVEL"); lvl != "" {
+			args = append(args, "--compress-level", lvl)
+		}
+	}
+
 	// Add S3/object storage options (use download endpoint for restore)
 	// For "full" strategy, all files are already local — skip object-storage args.
 	if strategy != "full" {
@@ -335,6 +346,15 @@ func (m *RestoreManager) StartPageServer(ctx context.Context, port int, checkpoi
 		"--images-dir", checkpointDir,
 		"-v4",
 		"--log-file", filepath.Join(checkpointDir, "lazy-pages.log"),
+	}
+
+	// zstd seekable compression: lazy-pages must know to decompress the
+	// fetched page chunks from S3 when the dump used --compress.
+	if os.Getenv("CRIU_COMPRESS") == "true" {
+		args = append(args, "--compress")
+		if lvl := os.Getenv("CRIU_COMPRESS_LEVEL"); lvl != "" {
+			args = append(args, "--compress-level", lvl)
+		}
 	}
 
 	// Connect to source page-server only if sourceAddr is provided

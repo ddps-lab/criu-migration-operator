@@ -226,6 +226,23 @@ type StorageConfig struct {
 	// Uploaded files: criu.log, restore.log, lazy-pages.log, stats-dump, stats-restore,
 	// hot_vma_metadata.json, and per-fault metrics. Useful for experiment data collection.
 	LogUpload bool `json:"logUpload,omitempty"`
+
+	// Compress enables CRIU's zstd seekable compression for pages-*.img during
+	// dump. Restore auto-detects compressed images, so no explicit restore flag.
+	// Trade-off (paper Table eval:dump-wall-time): redis/memcached see 40-50%
+	// byte savings and 11-16% dump wall reduction; numpy/torch random-data
+	// workloads see <5% wall savings because CRIU's CPU is wall-bound.
+	Compress bool `json:"compress,omitempty"`
+
+	// CompressLevel is the zstd level (1-22). Default 1 (fastest) when
+	// Compress is true. Higher levels trade CPU for more byte savings.
+	CompressLevel int `json:"compressLevel,omitempty"`
+
+	// CompressWorkers sets the number of parallel zstd encoder threads
+	// CRIU uses during dump. 0 = CRIU auto (min(nproc/4, 8)). Paper §eval
+	// uses 8 workers; specifying it explicitly here matches that setting
+	// regardless of nproc.
+	CompressWorkers int `json:"compressWorkers,omitempty"`
 }
 
 // MigratableAppStatus defines the observed state of MigratableApp

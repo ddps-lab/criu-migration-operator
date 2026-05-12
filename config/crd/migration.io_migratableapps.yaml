@@ -150,6 +150,12 @@ spec:
                     type: boolean
                   bucket:
                     type: string
+                  compress:
+                    type: boolean
+                  compressLevel:
+                    type: integer
+                  compressWorkers:
+                    type: integer
                   credentialsSecret:
                     type: string
                   directUpload:
